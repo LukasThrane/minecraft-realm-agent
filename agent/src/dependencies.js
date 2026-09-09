@@ -8,6 +8,44 @@ const qualify = counts => Object.fromEntries(Object.entries(counts).map(([item,c
   return [itemId(item),count];
 }));
 
+/**
+ * Gather what the plan needs in one trip instead of one item at a time.
+ *
+ * Backward chaining ensures each requirement as it meets it, so three separate needs for planks
+ * produce three separate `gather 1 oak_log` nodes. The plan already knew the total -- it printed
+ * `oak_log: 3` in its own summary -- and then walked to a tree three times anyway. Live, that is
+ * the agent mining one log, crafting, finding another tree, mining one log, and so on.
+ *
+ * Only nodes with identical dependencies merge. That is what makes it safe rather than merely
+ * convenient: keeping the dependency set unchanged cannot introduce an edge into the merged node's
+ * own past, so no ordering that was legal before becomes a cycle. Two cobblestone gathers that both
+ * wait on the same wooden pickaxe merge; a gather that waits on a tool made from an earlier gather
+ * of the same item does not.
+ */
+export function mergeGathers(nodes) {
+  const first = new Map(), replaced = new Map();
+  for (const node of nodes) {
+    if (node.kind !== 'gather') continue;
+    const key = JSON.stringify([node.item, node.tool ?? null, node.blocks ?? [], [...node.dependsOn].sort()]);
+    const target = first.get(key);
+    if (!target) { first.set(key, node); continue; }
+    target.count += node.count;
+    target.batches += node.batches;
+    target.produces = { ...target.produces, [target.item]: (target.produces[target.item] ?? 0) + node.count };
+    target.verification = `Observe ${target.count} additional ${target.item} in inventory`;
+    replaced.set(node.id, target.id);
+  }
+  if (!replaced.size) return { nodes, rename: id => id };
+  const kept = nodes.filter(node => !replaced.has(node.id));
+  const follow = id => replaced.get(id) ?? id;
+  // Renumber so the preview reads as a sequence rather than one with holes in it.
+  const renumber = new Map(kept.map((node, index) => [node.id, `step-${index + 1}`]));
+  const rename = id => renumber.get(follow(id)) ?? follow(id);
+  for (const node of kept) node.dependsOn = [...new Set(node.dependsOn.map(rename))].filter(id => id !== renumber.get(node.id));
+  for (const node of kept) node.id = renumber.get(node.id);
+  return { nodes: kept, rename };
+}
+
 export class DependencyPlanner {
   constructor(recipes = catalog.recipes) {
     this.byOutput = new Map();
@@ -151,9 +189,10 @@ export class DependencyPlanner {
       ensure(target,count);
       const projectedInventory=Object.fromEntries(Object.keys(state.lots).map(item=>[item,amount(item)]).filter(([,quantity])=>quantity>0));
       for(const item of Object.keys(state.tools)) projectedInventory[item]=(projectedInventory[item]??0)+1;
-      return {status:'planned',goal:{type:'obtain',item:target,count},nodes:state.nodes,rootDependencies:deps(target),
-        initialInventory:initial,projectedInventory,stations:state.stations,
-        summary:state.nodes.filter(node=>node.kind==='gather').reduce((totals,node)=>({...totals,[node.item]:(totals[node.item]??0)+node.count}),{}),
+      const {nodes,rename}=mergeGathers(state.nodes);
+      return {status:'planned',goal:{type:'obtain',item:target,count},nodes,rootDependencies:[...new Set(deps(target).map(rename))],
+        initialInventory:initial,projectedInventory,stations:Object.fromEntries(Object.entries(state.stations).map(([station,id])=>[station,id?rename(id):id])),
+        summary:nodes.filter(node=>node.kind==='gather').reduce((totals,node)=>({...totals,[node.item]:(totals[node.item]??0)+node.count}),{}),
         executable:false,remainingSearchBudget:remaining,limitations:['Plan only: live skill executors not yet wired','No optimality guarantee; ordered bounded backtracking','Ore discovery, access and tool durability require execution-time checks','Fuel: coal, eight furnace operations per item, assumes one continuous batch','Vanilla 26.2 recipes; server datapacks may differ']};
     } catch(error) {return {status:remaining<0?'incomplete':'blocked',goal:{type:'obtain',item:target,count},nodes:[],reason:error.message,executable:false};}
   }

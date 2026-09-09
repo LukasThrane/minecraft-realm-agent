@@ -36,8 +36,10 @@ final class Skills {
     private final BlockPos origin;
     private final List<Runnable> restoreSettings = new ArrayList<>();
     private boolean returning;
-    private int returnTicks;
+    private int returnTicks, returnAttempts, approachAttempts;
     private Goal returnGoal;
+    /** Bounded retries: a route that keeps failing is a typed failure, not an infinite wait. */
+    private static final int RETURN_ATTEMPTS = 3, APPROACH_ATTEMPTS = 3;
 
     Skills(Minecraft mc, JsonObject args) {
         this.args=args;kind=args.get("kind").getAsString();item=args.get("item").getAsString();
@@ -120,6 +122,29 @@ final class Skills {
         }
         return false;
     }
+    /** A station we own: remembered first, then whatever the local scan turns up. */
+    BlockPos station(Minecraft mc, String kind) {
+        Stations.refresh(mc);
+        for(BlockPos remembered:Stations.nearest(mc,kind)) return remembered;
+        return find(mc,"minecraft:"+kind);
+    }
+    /**
+     * Get within reach of a station, walking to a remembered one if we are no longer beside it.
+     *
+     * Returns null while still travelling. A route that keeps failing ends as `station_unreachable`
+     * rather than spinning until the action deadline, because "we own a table but cannot get to it"
+     * is a different problem from owning none, and only the typed form can be acted on later.
+     */
+    BlockPos approach(Minecraft mc, String kind) {
+        if(target==null) target=station(mc,kind);
+        if(target==null) throw new IllegalStateException("station_missing: no known "+kind);
+        var pathing=BaritoneAPI.getProvider().getPrimaryBaritone();
+        if(hit(mc,target)!=null) {pathing.getPathingBehavior().forceCancel();Stations.record(mc,target,kind);return target;}
+        if(pathing.getCustomGoalProcess().isActive()) {waitUntil=age+10;return null;}
+        if(++approachAttempts>APPROACH_ATTEMPTS) throw new IllegalStateException("station_unreachable: no route to "+kind+" at "+target.toShortString());
+        pathing.getCustomGoalProcess().setGoalAndPath(new GoalNear(target,2));
+        waitUntil=age+20;return null;
+    }
     BlockHitResult hit(Minecraft mc, BlockPos pos) {
         Vec3 eye=mc.player.getEyePosition(), center=Vec3.atCenterOf(pos);
         Vec3 delta=center.subtract(eye);
@@ -157,15 +182,21 @@ final class Skills {
             if(returnTicks>=5) {
                 if(count(mc,item)>=baseline+count) return "Inventory gain and return to worksite verified: "+item;
                 throw new IllegalStateException("return_inventory_shortfall: acquired materials no longer present");
-            } else if(!baritone.getCustomGoalProcess().isActive() && !home) {
-                throw new IllegalStateException("return_path_failed: materials acquired but worksite not reached");
+            }
+            if(!baritone.getCustomGoalProcess().isActive() && !home) {
+                if(++returnAttempts<=RETURN_ATTEMPTS) {
+                    try { returnGoal=returnArea(mc); } catch(RuntimeException unavailable) { return concludeGather(mc,unavailable.getMessage()); }
+                    baritone.getCustomGoalProcess().setGoalAndPath(returnGoal);
+                    waitUntil=age+10;return null;
+                }
+                return concludeGather(mc,"no route back to the worksite");
             }
             return null;
         }
         if(count(mc,item)>=baseline+count) {
             baritone.getMineProcess().cancel();
             baritone.getPathingBehavior().forceCancel();
-            returnGoal=returnArea(mc);
+            try { returnGoal=returnArea(mc); } catch(RuntimeException unavailable) { return concludeGather(mc,unavailable.getMessage()); }
             baritone.getCustomGoalProcess().setGoalAndPath(returnGoal);
             returning=true;waitUntil=age+5;return null;
         }
@@ -188,13 +219,31 @@ final class Skills {
         if(!baritone.getMineProcess().isActive()) throw new IllegalStateException("mining_path_failed: no accessible targets or pickup route");
         return null;
     }
+    /**
+     * The trip home is a convenience, not the outcome.
+     *
+     * Returning exists so the next step still finds the stations we left behind, and stations are
+     * now remembered by position rather than by proximity, so a failed walk back no longer costs
+     * us anything we cannot recover by walking there again. Failing the whole multi-step goal over
+     * it threw away materials already in hand and made the operator retype the command to make the
+     * identical plan one step further, which is the one outcome the evidence never justified.
+     */
+    String concludeGather(Minecraft mc, String why) {
+        if(count(mc,item)<baseline+count) throw new IllegalStateException("return_inventory_shortfall: acquired materials no longer present");
+        return "Inventory gain verified: "+item+" (return to worksite incomplete: "+why+")";
+    }
     String deploy(Minecraft mc) {
+        String kind=item.replace("minecraft:","");
         if(target!=null) {
-            if(String.valueOf(BuiltInRegistries.BLOCK.getKey(mc.level.getBlockState(target).getBlock())).equals(item)) return "Station placement observed";
+            if(String.valueOf(BuiltInRegistries.BLOCK.getKey(mc.level.getBlockState(target).getBlock())).equals(item)) {
+                // Record it where it stands, so walking away is not the same as losing it.
+                Stations.record(mc,target,kind);
+                return "Station placement observed";
+            }
             throw new IllegalStateException("placement_not_observed");
         }
         BlockPos existing=find(mc,item);
-        if(existing!=null && hit(mc,existing)!=null) return "Existing reachable station observed";
+        if(existing!=null && hit(mc,existing)!=null) {Stations.record(mc,existing,kind);return "Existing reachable station observed";}
         if(stage==0) {if(!select(mc,item)) throw new IllegalStateException("station_item_missing");stage=1;waitUntil=age+5;return null;}
         for(BlockPos candidate:BlockPos.betweenClosed(mc.player.blockPosition().offset(-3,-2,-3),mc.player.blockPosition().offset(3,2,3))) {
             BlockPos place=candidate.immutable(), support=place.below();
@@ -210,15 +259,8 @@ final class Skills {
     String craft(Minecraft mc) {
         if(stage==0) {
             if(args.get("station").getAsString().equals("crafting_table")) {
-                target=find(mc,"minecraft:crafting_table");
-                if(target==null) throw new IllegalStateException("station_missing");
-                var hit=hit(mc,target);
-                if(hit==null) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(target,2));
-                    waitUntil=age+20;return null;
-                }
-                BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().forceCancel();
-                mc.gameMode.useItemOn(mc.player,InteractionHand.MAIN_HAND,hit);
+                if(approach(mc,"crafting_table")==null) return null;
+                mc.gameMode.useItemOn(mc.player,InteractionHand.MAIN_HAND,hit(mc,target));
                 openedMenu=true;stage=1;waitUntil=age+10;return null;
             }
             stage=1;
@@ -264,15 +306,8 @@ final class Skills {
     }
     String smelt(Minecraft mc) {
         if(stage==0) {
-            target=find(mc,"minecraft:furnace");
-            if(target==null) throw new IllegalStateException("furnace_missing");
-            var hit=hit(mc,target);
-            if(hit==null) {
-                BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(target,2));
-                waitUntil=age+20;return null;
-            }
-            BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().forceCancel();
-            mc.gameMode.useItemOn(mc.player,InteractionHand.MAIN_HAND,hit);
+            if(approach(mc,"furnace")==null) return null;
+            mc.gameMode.useItemOn(mc.player,InteractionHand.MAIN_HAND,hit(mc,target));
             openedMenu=true;stage=1;waitUntil=age+10;return null;
         }
         if(stage==1) {

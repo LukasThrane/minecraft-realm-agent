@@ -554,11 +554,11 @@ public final class BridgeClient implements ClientModInitializer {
             JsonObject state=new JsonObject();state.addProperty("protocol",3);state.addProperty("observedAt",now);state.addProperty("epoch",epoch.get());state.addProperty("session",session);
             state.addProperty("online",mc.player!=null);state.addProperty("phase",phase);state.addProperty("reason",reason);state.addProperty("actionId",actionId);
             state.addProperty("canAct",mc.player!=null && mc.gui.screen()==null && !mc.isPaused() && mc.player.getHealth()>0);
-            state.addProperty("skillsVersion",1);
+            state.addProperty("skillsVersion",2);
             state.addProperty("reflexArmed",reflexArmed);state.addProperty("reflex",activeReflex);state.addProperty("reflexCount",reflexCount);
             JsonObject queued=pending.get();
             state.addProperty("pendingActionId",queued==null?"":queued.get("actionId").getAsString());
-            state.addProperty("bridgeBuild","shallow-gather-return-2");
+            state.addProperty("bridgeBuild","remembered-stations-1");
             state.addProperty("progress",progress.score());state.addProperty("stagnantTicks",progress.stagnantTicks());
             state.addProperty("failure",failure);
             state.addProperty("singleplayer",singleplayer);state.addProperty("buildScopeAvailable",singleplayer);

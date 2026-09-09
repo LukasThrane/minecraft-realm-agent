@@ -21,13 +21,9 @@ import java.util.*;
  */
 final class Observations {
     static final int MAX_RADIUS = 48, MAX_ENTITIES = 64;
-    private static net.minecraft.client.multiplayer.ClientLevel stationLevel;
-    private static long stationAt;
-    private static BlockPos stationOrigin;
-    private static JsonArray stationCache = new JsonArray();
     private Observations() {}
 
-    static void invalidateStations() { stationAt=0; }
+    static void invalidateStations() { Stations.invalidateScan(); }
 
     static JsonObject build(Minecraft mc) {
         JsonObject out = new JsonObject();
@@ -46,20 +42,13 @@ final class Observations {
         out.add("self", self(player));
         out.add("entities", entities(level.entitiesForRendering(), player));
         out.add("inventory", inventory(player));
-        long now=System.currentTimeMillis();
-        if(stationLevel!=level || now-stationAt>=1000 || stationOrigin==null || stationOrigin.distSqr(at)>16) {
-            JsonArray stations=new JsonArray();
-            Set<String> foundStations=new HashSet<>();
-            for(BlockPos position:BlockPos.betweenClosed(at.offset(-24,-12,-24),at.offset(24,12,24))) {
-                if(!level.hasChunkAt(position)) continue;
-                var block=level.getBlockState(position).getBlock();
-                if(block==net.minecraft.world.level.block.Blocks.CRAFTING_TABLE) foundStations.add("crafting_table");
-                if(block==net.minecraft.world.level.block.Blocks.FURNACE) foundStations.add("furnace");
-            }
-            for(String station:foundStations) stations.add(station);
-            stationCache=stations;stationAt=now;stationOrigin=at.immutable();stationLevel=level;
-        }
-        out.add("stations",stationCache.deepCopy());
+        // Stations are remembered rather than rescanned, so walking away from a table we placed
+        // does not convince the planner it needs to craft another one.
+        Stations.refresh(mc);
+        JsonArray stations=new JsonArray();
+        for(String station:Stations.kinds(mc)) stations.add(station);
+        out.add("stations",stations);
+        out.add("stationSites",Stations.sites(mc));
         return out;
     }
 

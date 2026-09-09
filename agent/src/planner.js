@@ -18,16 +18,25 @@ export class Planner {
         // Every field is required: a per-type conditional requirement is not expressible here, and
         // optional fields came back missing, producing navigate with no destination and move with
         // no duration. Fields irrelevant to the chosen type are ignored.
-        format: { type: 'object', additionalProperties: false, required: ['type','x','z','direction','ticks','why'], properties: {
-          type: { type: 'string', enum: ['continue','done','navigate','move','break','place','jump','select'] },
+        format: { type: 'object', additionalProperties: false, required: ['type','x','z','direction','ticks','item','count','why'], properties: {
+          type: { type: 'string', enum: ['continue','done','obtain','navigate','move','break','place','jump','select'] },
           x: { type: 'integer' }, z: { type: 'integer' },
           direction: { type: 'string', enum: ['forward','back','left','right'] },
           ticks: { type: 'integer' }, slot: { type: 'integer' },
+          item: { type: 'string' }, count: { type: 'integer' },
           why: { type: 'string' } } },
         messages: [{ role: 'system', content: [
+          // Purpose is operator-authored and arrives from config/charter.md. The model derives
+          // objectives from it and is never asked to invent one; an agent that writes its own
+          // charter has no fallback, because nothing outranks whatever it last decided it wanted.
+          this.config.charter ? `Your standing charter, which you did not write and may not change:\n${this.config.charter}\n` : '',
           'You choose the next action for a Minecraft character. One JSON object, no prose.',
-          'Actions: continue (keep doing what is already running), navigate {x,z}, move {direction,ticks 1..100},',
-          'break {ticks 1..200} (breaks the block under the crosshair), place, jump, select {slot 0..8}.',
+          'Actions: continue (keep doing what is already running), obtain {item,count}, navigate {x,z},',
+          'move {direction,ticks 1..100}, break {ticks 1..200} (breaks the block under the crosshair), place, jump, select {slot 0..8}.',
+          'obtain is how you get anything: it gathers, crafts, places stations and smelts by itself, working out the whole',
+          'dependency chain from what you already carry. Ask for the finished thing -- obtain {item:"stone pickaxe",count:1} --',
+          'not for its ingredients, and never step through a recipe with break and place. It runs for minutes; answer',
+          'continue while it does. If it fails it will say what was missing.',
           'Prefer continue when the running action is still making progress: it costs nothing and the body never stops.',
           'Answer done when lastOutcomes show the goal has already been achieved. Do not keep re-issuing a finished goal.',
           'Navigation is handled by a pathfinder, so navigate to a destination rather than stepping there with move.',
@@ -35,7 +44,9 @@ export class Planner {
           'If the situation says you are already at the destination, do not navigate there again.',
           'Never repeat something listed as already failed. Choose a different approach instead.',
           'If lastRejection is set, your previous answer was malformed or forbidden. Fix exactly that.',
-          'why must be one short sentence.'].join(' ') },
+          'why must be one short sentence.',
+          this.config.charter ? 'When the goal is satisfied or absent, choose the next action from the charter rather than stopping.' : ''
+        ].filter(Boolean).join(' ') },
           { role: 'user', content: JSON.stringify({ goal, situation, recentChanges: trend, runningNow: active,
             alreadyFailed: banned || 'nothing yet', lastOutcomes: recent, lastRejection: rejection || null }) }]
       })

@@ -1,92 +1,153 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { describe, trend } from './observe.js';
 import { runGate1 } from './gate1.js';
 import { runBench } from './bench.js';
 import { root, openSession } from './setup.js';
-import { CraftingTools } from './crafting.js';
-import { DependencyPlanner, parseObtainGoal, formatDependencyPlan } from './dependencies.js';
+import { classify } from './commands.js';
+import { parseObtainGoal } from './dependencies.js';
+import { queries, QUERY_HELP } from './queries.js';
 import { SkillExecutor } from './skills.js';
+
+/**
+ * Two kinds of input, told apart by a slash rather than by guessing.
+ *
+ * `/word` is one immediate thing: it prints, or it moves the player once, and it is over. Bare
+ * text is a goal, which runs for as long as it takes and is interrupted with stop. The previous
+ * console inferred which was which from an ordered pile of patterns, so `craft 6 logs` was a goal
+ * and `fetch 6 logs` fell through to the model as free text -- the same request, two behaviours,
+ * for no reason a user could see.
+ *
+ * Stop is the exception that needs no slash. A safety command must never fail because of syntax.
+ */
 const args = process.argv.slice(2);
 const { config, bridge, agent, log } = await openSession({ args, name: 'events',
   emit: event => console.log(event.message ?? `${event.state?.phase}: ${event.state?.reason}`) });
 const input = createInterface({ input: process.stdin, output: process.stdout });
-const crafting = new CraftingTools(bridge);
-const dependencies = new DependencyPlanner();
-const skills = new SkillExecutor(bridge,message=>{console.log(message);log.emit({kind:'skill-progress',message});});
+const skills = new SkillExecutor(bridge, message => { console.log(message); log.emit({ kind: 'skill-progress', message }); });
+// One implementation of the look-only commands, shared with `./windove run`, so they behave the
+// same in both places and neither can quietly forget one.
+const views = queries({ bridge, attempts: skills.attempts, log: event => log.emit(event) });
 let skillAbort;
 let closing = false, lastError = '', nextSample = 0, busy = false;
-async function shutdown() { if (closing) return;closing=true;skillAbort?.abort();try { await agent.stop(); } catch {}input.close();log.close(); }
-process.on('SIGINT', shutdown);process.on('SIGTERM', shutdown);input.on('close', shutdown);
-input.on('line', line => {
-  if(line.trim().toLowerCase()==='cancel') line='stop';
-  if(line.trim()==='help') console.log('Goals: get|fetch|gather|collect|craft <count> <item> | plan <count> <item> | cancel. Examples: get 6 logs, craft stone pickaxe, plan 10 planks.');
-  if (line.trim()==='quit') { void shutdown();return; }
-  if (line.trim()==='help') {console.log('inventory | craftable | can-craft <item> | go to 200 200 | go to site | forward|back|left|right [ticks] | turn 90 | face <yaw> <pitch> | jump | slot 0-8 | break [ticks] | place | status | look [radius] | history | frame | reflex on|off | respawn | gate1 | bench [routes] | stop | quit. Return to Minecraft and close the menu to start a queued command. F8 takes over.');return;}
-  // Observation is read-only and deliberately bypasses the supervisor: looking must never
-  // cancel, extend or start an action, so it does not touch action authority at all.
-  const [word, ...rest] = line.trim().split(/\s+/);
-  const goal = parseObtainGoal(line);
-  if(word==='stop') skillAbort?.abort();
-  if(goal && word!=='plan') {
-    if(busy || agent.active) {console.error('An action is running. Type stop first.');return;}
-    busy=true;skillAbort=new AbortController();
-    void skills.run(goal,skillAbort.signal).catch(error=>console.error(`Goal stopped: ${error.message}`))
-      .finally(async()=>{try {await bridge.stop();} catch {}busy=false;skillAbort=null;});return;
+
+async function shutdown() {
+  if (closing) return;
+  closing = true; skillAbort?.abort();
+  try { await agent.stop(); } catch {}
+  input.close(); log.close();
+}
+process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown); input.on('close', shutdown);
+
+/**
+ * One-shot world actions, expressed as the phrasing `directCommand` already parses. The slash layer
+ * is a front end over that parser, not a second copy of its bounds.
+ */
+const WORLD = {
+  go: rest => rest[0] === 'site' ? 'go to site' : `go to ${rest[0]} ${rest[1]}`,
+  forward: rest => `forward ${rest[0] ?? 10}`, back: rest => `back ${rest[0] ?? 10}`,
+  left: rest => `left ${rest[0] ?? 10}`, right: rest => `right ${rest[0] ?? 10}`,
+  turn: rest => `turn ${rest[0]}`, face: rest => `face ${rest[0]} ${rest[1]}`,
+  jump: () => 'jump', place: () => 'place', slot: rest => `slot ${rest[0]}`,
+  break: rest => `break ${rest[0] ?? 100}`, respawn: () => 'respawn', status: () => 'status'
+};
+
+const HELP = `
+Bare text is a goal. It runs until it finishes or you stop it:
+  craft stone pickaxe        get 6 logs        craft 64 planks
+  Chains gathering, crafting, station placement and smelting, replanning from
+  inventory after every step.${config.modelEnabled ? '' : '  Free-form wording needs --model.'}
+
+/commands are immediate.
+  Look:    /inventory  /craftable  /can-craft <item>  /plan [n] <item>
+           /look [radius]  /status  /history  /frame
+  Move:    /go <x> <z>  /go site  /forward|/back|/left|/right [ticks]
+           /turn <deg>  /face <yaw> <pitch>  /jump  /slot 0-8
+  World:   /break [ticks]  /place  /respawn
+  Memory:  /failures  /forget          Safety: /reflex on|off
+  Tests:   /gate1 [trials]  /bench [routes] [distance]
+  Control: /stop  /quit
+
+stop and cancel work with or without the slash. F8 in Minecraft takes over.
+Read-only commands keep working while a goal runs.`.trim();
+
+input.on('line', line => { void handle(line).catch(error => { if (error.name !== 'AbortError') console.error(error.message); }); });
+
+async function handle(raw) {
+  const routed = classify(raw);
+  switch (routed.kind) {
+    case 'empty': return;
+    case 'stop': skillAbort?.abort(); return agent.stop().catch(e => console.error(e.message));
+    case 'help': return void console.log(HELP);
+    case 'goal': return goal(routed.text);
+    case 'preview': return void console.log(await views.run('plan', [routed.text]));
+    case 'preview_only': return void console.error('Use /plan for a read-only preview.');
+    default: return command(routed.name, routed.rest);
   }
-  if (goal) {
-    void crafting.inventory().then(snapshot=>{
-      const plan=dependencies.plan(goal.item,goal.count,snapshot.craftingItems,{stations:snapshot.stations??[]});
-      log.emit({kind:'dependency-plan',observedAt:snapshot.observedAt,session:snapshot.session,plan});
-      console.log(formatDependencyPlan(plan));
-    }).catch(error=>{
-      const plan=dependencies.plan(goal.item,goal.count,{});
-      log.emit({kind:'dependency-plan',offline:true,error:error.message,plan});
-      console.error(`Live inventory unavailable (${error.message}); showing an empty-inventory preview.`);
-      console.log(formatDependencyPlan(plan));
-    });return;
+}
+
+async function command(name, rest) {
+  if (name === 'quit') return void shutdown();
+  // Looking never cancels, extends or starts an action, so it works while a goal is running.
+  if (views.handles(name)) return void console.log(await views.run(name, rest));
+  if (busy && name !== 'frame' && name !== 'forget') return void console.error('A goal or harness is running. Type stop first.');
+
+  switch (name) {
+    case 'frame': return frame();
+    case 'forget': skills.attempts.records.clear(); return void console.log('Skill failure memory cleared.');
+    case 'reflex': {
+      const armed = await bridge.reflex(await bridge.state(), rest[0] !== 'off');
+      return void console.log(`Safety reflexes ${armed.armed ? 'armed' : 'disarmed'}`);
+    }
+    case 'gate1': case 'bench': {
+      busy = true;
+      const run = name === 'gate1'
+        ? runGate1({ agent, bridge, log, site: config.site, stopTrials: Number(rest[0]) || 5 })
+        : runBench({ agent, bridge, log, trials: Number(rest[0]) || 20, distance: Number(rest[1]) || 120 });
+      return void run.catch(e => console.error(e.message)).finally(() => { busy = false; });
+    }
   }
-  if (word==='inventory' || word==='craftable' || word==='can-craft') {
-    const query=word==='inventory'?crafting.inventory():word==='craftable'?crafting.craftable():crafting.canCraft(rest.join(' '));
-    void query.then(result=>console.log(JSON.stringify(result,null,2))).catch(error=>console.error(error.message));return;
-  }
-  if (word==='look') {void look(Number(rest[0])||32).catch(e=>console.error(e.message));return;}
-  if (word==='reflex') {void bridge.state().then(s=>bridge.reflex(s,rest[0]!=='off')).then(r=>console.log(`Safety reflexes ${r.armed?'armed':'disarmed'}`)).catch(e=>console.error(e.message));return;}
-  if (word==='history') {void bridge.history().then(h=>{log.emit({kind:'history',history:h});console.log(trend(h));}).catch(e=>console.error(e.message));return;}
-  // Harnesses run on this console's own supervisor: one agent, one control lease, no second
-  // process competing for it. The poll loop stands down while one is running.
-  if (word==='gate1'||word==='bench') {
-    if (busy) {console.error('A harness is already running. Type stop to cancel it.');return;}
-    busy = true;
-    const run = word==='gate1'
-      ? runGate1({agent,bridge,log,site:config.site,stopTrials:Number(rest[0])||5})
-      : runBench({agent,bridge,log,trials:Number(rest[0])||20,distance:Number(rest[1])||120});
-    void run.catch(e=>console.error(e.message)).finally(()=>{busy=false;});
+  if (!WORLD[name]) return void console.error(`Unknown command: /${name}. Type /help.`);
+  const state = await agent.order(WORLD[name](rest));
+  if (state) console.log(JSON.stringify(state, null, 2));
+}
+
+/**
+ * A goal, not a command. `plan` is deliberately not accepted here: it reads as an instruction to
+ * go and do the thing, and a preview that starts mining is the worst possible misunderstanding.
+ */
+async function goal(text) {
+  const parsed = parseObtainGoal(text);
+  if (!parsed) {
+    if (!config.modelEnabled) return void console.error(`Not understood: "${text}". Try: craft stone pickaxe, get 6 logs. Type /help, or start with --model for free-form wording.`);
+    const state = await agent.order(text);
+    if (state) console.log(JSON.stringify(state, null, 2));
     return;
   }
-  if (word==='frame') {void frame().catch(e=>console.error(e.message));return;}
-  if(busy && word!=='stop' && word!=='status') {console.error('A skill or harness is running. Type stop first.');return;}
-  void agent.order(line).then(state => {if(state) console.log(JSON.stringify(state,null,2));}).catch(e => {if(e.name!=='AbortError') console.error(e.message);});
-});
-async function look(radius) {
-  const observation = await bridge.observe();
-  log.emit({kind:'observation',radius,observation});
-  console.log(describe(observation,{radius}));
+  if (busy || agent.active) return void console.error('A goal is already running. Type stop first.');
+  busy = true; skillAbort = new AbortController();
+  void skills.run(parsed, skillAbort.signal)
+    .catch(error => { if (error.name !== 'AbortError') console.error(`Goal stopped: ${error.message}`); })
+    .finally(async () => { try { await bridge.stop(); } catch {} busy = false; skillAbort = null; });
 }
+
 async function frame() {
   const captured = await bridge.frame();
-  const path = resolve(root,`../runtime/frames/frame-${captured.capturedAt}.png`);
-  mkdirSync(dirname(path),{recursive:true});writeFileSync(path,captured.bytes,{mode:0o600});
-  log.emit({kind:'frame',path,capturedAt:captured.capturedAt,ageMs:captured.ageMs,fresh:captured.fresh,width:captured.width,height:captured.height});
-  console.log(`${captured.width}x${captured.height}, ${captured.ageMs}ms old${captured.fresh?'':' (STALE: client produced no new frame in time)'} -> ${path}`);
+  const path = resolve(root, `../runtime/frames/frame-${captured.capturedAt}.png`);
+  mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, captured.bytes, { mode: 0o600 });
+  log.emit({ kind: 'frame', path, capturedAt: captured.capturedAt, ageMs: captured.ageMs, fresh: captured.fresh, width: captured.width, height: captured.height });
+  console.log(`${captured.width}x${captured.height}, ${captured.ageMs}ms old${captured.fresh ? '' : ' (STALE: client produced no new frame in time)'} -> ${path}`);
 }
-console.log(`Private testing console. Model ${config.modelEnabled ? config.model : 'disabled'}. Type help. Nothing moves until you give a command.`);
+
+console.log(`Private testing console. Model ${config.modelEnabled ? config.model : 'disabled'}. Type /help. Nothing moves until you give a command.`);
 while (!closing) {
   try {
-    if (busy) { await new Promise(r=>setTimeout(r,200)); continue; }
-    const state = await agent.poll();lastError='';
-    if (agent.active && Date.now()>nextSample) {nextSample=Date.now()+3000;log.emit({kind:'sample',state});console.log(`Observed ${state.x?.toFixed(1)}, ${state.y?.toFixed(1)}, ${state.z?.toFixed(1)} (${state.positionSource}); ${state.phase}`);}
-  } catch(e) {if(e.message!==lastError) console.error(e.message);lastError=e.message;}
-  await new Promise(r=>setTimeout(r,500));
+    if (busy) { await new Promise(r => setTimeout(r, 200)); continue; }
+    const state = await agent.poll(); lastError = '';
+    if (agent.active && Date.now() > nextSample) {
+      nextSample = Date.now() + 3000; log.emit({ kind: 'sample', state });
+      console.log(`Observed ${state.x?.toFixed(1)}, ${state.y?.toFixed(1)}, ${state.z?.toFixed(1)} (${state.positionSource}); ${state.phase}`);
+    }
+  } catch (e) { if (e.message !== lastError) console.error(e.message); lastError = e.message; }
+  await new Promise(r => setTimeout(r, 500));
 }

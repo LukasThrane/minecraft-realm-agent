@@ -9,10 +9,22 @@ export function flag(args, name) {
   if (value === undefined || value.startsWith('--')) throw Error(`${name} requires a value`);
   return value;
 }
+/**
+ * The standing purpose, authored by the operator and never by the agent.
+ *
+ * Loaded from disk on every start rather than baked in, so editing the charter and restarting is
+ * the whole workflow for changing what the agent is for. Missing is not fatal: the agent then has
+ * no purpose to fall back on and says so, which is a better failure than inventing one.
+ */
+export function loadCharter(path = resolve(root, '../config/charter.md')) {
+  try { return readFileSync(path, 'utf8').trim(); }
+  catch { return ''; }
+}
 /** Shared entry for every console: same config file, same per-instance bridge token. */
 export function loadConfig(args) {
   const config = JSON.parse(readFileSync(resolve(root, '../config/mvp.json')));
   config.modelEnabled = args.includes('--model');
+  config.charter = loadCharter();
   const tokenFile = flag(args, '--token-file')
     ?? resolve(root, args.includes('--dev') ? '../client-mod/run/config/windove-bridge-token.txt' : '../runtime/realm-client/config/windove-bridge-token.txt');
   let token;

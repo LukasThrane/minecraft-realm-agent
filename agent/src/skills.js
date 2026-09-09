@@ -1,7 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { catalog, CraftingTools } from './crafting.js';
+import { Attempts, deadlineFor, disposition, scopeFor, validateAction, validateAssumptions } from './commands.js';
 import { DependencyPlanner } from './dependencies.js';
+
+/**
+ * What a skill is allowed to assume about the world while it runs.
+ *
+ * The client re-checks these every tick and voids the action the moment one stops holding, so a
+ * four-minute mining trip no longer keeps digging through a fight it is losing. The floor is
+ * derived from health at dispatch rather than fixed, because a fixed one would either void
+ * instantly when the goal is issued at two hearts or never bind at all.
+ *
+ * Deliberately not `holding`: Baritone's automatic tool selection changes the held item during a
+ * gather, so asserting it would void every mining action within a second of starting one.
+ */
+export function assumptionsFor(action, state) {
+  const health = Number.isFinite(state?.health) ? state.health : null;
+  if (health === null || action.kind === 'craft') return undefined;
+  return { minHealth: Math.max(1, Math.min(6, Math.floor(health) - 2)) };
+}
 
 export function craftAction(node, inventory) {
   const recipe=catalog.recipes.find(recipe=>recipe.id===node.method);
@@ -25,10 +43,21 @@ export function craftAction(node, inventory) {
 }
 
 export class SkillExecutor {
-  constructor(bridge, emit=console.log) {
+  constructor(bridge, emit=console.log, { attempts=new Attempts(), maxPreemptions=5 }={}) {
     this.bridge=bridge;this.emit=emit;this.inventory=new CraftingTools(bridge);this.planner=new DependencyPlanner();
+    // Outlives one goal on purpose: retyping a command that has failed the same way three times
+    // should say so, not walk the same broken route again.
+    this.attempts=attempts;
+    // A reflex may interrupt the work; it may not become the work. Past this cap the honest
+    // conclusion is not that the step is wrong but that the place is, and that is worth saying.
+    this.maxPreemptions=maxPreemptions;
   }
-  async action(action, authority, signal) {
+  async action(rawAction, authority, signal) {
+    // Skills used to be the one action type that reached the client without host-side validation,
+    // a policy scope or a deadline of its own. They go through the same envelope as everything
+    // else now, so a malformed grid is refused here rather than becoming a bridge 400 mid-goal.
+    const action=validateAction(rawAction);
+    const deadlineMs=deadlineFor(action);
     let state=await this.bridge.state();
     const check=()=>{
       signal.throwIfAborted();
@@ -43,33 +72,44 @@ export class SkillExecutor {
     }
     check();
     const id=randomUUID();
-    await this.bridge.act(action,state,id,120000,'build');
-    const deadline=Date.now()+125000;
+    await this.bridge.act(action,state,id,deadlineMs,scopeFor(action),validateAssumptions(assumptionsFor(action,state)));
+    const deadline=Date.now()+deadlineMs+5000;
     while(Date.now()<deadline) {
       check();
       await this.bridge.lease(authority);
       await delay(200,undefined,{signal});state=await this.bridge.state();check();
       if(state.outcome?.actionId===id) {
-        if(state.outcome.status!=='succeeded') throw Error(state.outcome.reason);
+        if(state.outcome.status!=='succeeded') {
+          // Carry the typed failure alongside the text: free text cannot be matched later.
+          const error=Error(state.outcome.reason);
+          error.failure=state.outcome.failure ?? state.failure ?? 'controller_error';
+          throw error;
+        }
         this.emit(state.outcome.reason);return;
       }
     }
-    throw Error('Skill deadline exceeded');
+    const expired=Error('Skill deadline exceeded');expired.failure='deadline';throw expired;
   }
   async run(goal, signal) {
     const authority=await this.bridge.state();
-    if(authority.skillsVersion!==1) throw Error('Client skills unavailable. Run ./windove build and restart Minecraft.');
+    if(authority.skillsVersion!==2) throw Error('Client skills unavailable or out of date. Run ./windove build and restart Minecraft.');
     if(authority.acting || authority.pendingActionId) throw Error('Stop the current action before starting a skill goal');
-    const stations=new Set();
+    // The client remembers stations by position now, so the snapshot is the authority. This used
+    // to be cleared and refilled from a scan around the player, which meant a table we had just
+    // placed stopped existing as soon as a gather walked us out of its radius, and the very next
+    // plan cheerfully built another one.
+    //
+    // Stations deployed during this run stay in the union anyway. If one really is gone the next
+    // craft fails as `station_missing` with a position, which is a better answer than quietly
+    // spending two more logs to duplicate something we already own.
+    const deployed=new Set();
+    let stations=[], preemptions=0;
     for(let step=0;step<128;step++) {
       signal.throwIfAborted();
       const snapshot=await this.inventory.inventory();
       if(snapshot.session!==authority.session) throw Error('World changed; goal cancelled');
-      if(Array.isArray(snapshot.stations)) {
-        stations.clear();
-        for(const station of snapshot.stations) if(['crafting_table','furnace'].includes(station)) stations.add(station);
-      }
-      const plan=this.planner.plan(goal.item,goal.count,snapshot.craftingItems,{stations:[...stations]});
+      stations=[...new Set([...(snapshot.stations??[]).filter(station=>['crafting_table','furnace'].includes(station)),...deployed])];
+      const plan=this.planner.plan(goal.item,goal.count,snapshot.craftingItems,{stations});
       if(plan.status!=='planned') throw Error(plan.reason);
       const node=plan.nodes[0];
       if(!node) {this.emit(`Goal verified: ${goal.count} ${plan.goal.item}`);return;}
@@ -77,9 +117,25 @@ export class SkillExecutor {
         type:'skill',kind:node.kind,item:node.item??`minecraft:${node.station}`,count:node.count??1,blocks:node.blocks??[],tool:node.tool??null
       };
       if(node.kind==='smelt') action.count=Math.min(action.count,8);
+      const banned=this.attempts.banned(action);
+      if(banned) throw Error(`Refusing to repeat a known failure: ${banned}. Change the situation or type stop.`);
       this.emit(`${node.kind}: ${action.count} ${action.item}`);
-      await this.action(action,authority,signal);
-      if(node.kind==='deploy_station') stations.add(node.station);
+      try { await this.action(action,authority,signal); }
+      catch(error) {
+        // The body dealt with something and is fine. The objective was never the problem, so it is
+        // not recorded as a failure of this step, and the next loop replans from a fresh
+        // observation -- which is the resume, because progress for these jobs is the inventory.
+        if(disposition(error.failure)==='resume' && ++preemptions<=this.maxPreemptions) {
+          this.emit(`Interrupted by the safety tier (${error.message}); resuming ${node.kind} ${action.item}`);
+          continue;
+        }
+        if(error.failure) this.attempts.record(action,error.failure);
+        if(disposition(error.failure)==='resume')
+          throw Error(`Interrupted ${preemptions-1} times by safety reflexes; this area is not safe enough to work in`);
+        throw error;
+      }
+      this.attempts.record(action,'');
+      if(node.kind==='deploy_station') deployed.add(node.station);
     }
     throw Error('Goal exceeded 128 skill steps');
   }
