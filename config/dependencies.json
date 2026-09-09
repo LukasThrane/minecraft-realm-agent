@@ -1,0 +1,15 @@
+{
+  "baritone": {
+    "url": "https://github.com/dysnasia/baritone-26.2/releases/download/26.2/fabric-26.2.jar",
+    "sha256": "545be65cbc42113768109762ad3098ba4e4c4915a44fac6f8799051a83f31d1e",
+    "source": "https://github.com/dysnasia/baritone-26.2",
+    "tag": "26.2",
+    "status": "unofficial candidate; runtime validation pending"
+  },
+  "minecraft": "26.2",
+  "fabricLoader": "0.19.5",
+  "fabricApi": "0.159.0+26.2",
+  "loom": "1.17.20",
+  "gradle": "9.7.1",
+  "javaRelease": 25
+}

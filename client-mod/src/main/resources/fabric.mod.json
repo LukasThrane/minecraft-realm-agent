@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "windove_bridge",
+  "version": "0.1.0",
+  "name": "Windove Testing Bridge",
+  "environment": "client",
+  "entrypoints": {"client": ["dev.windove.bridge.BridgeClient"]},
+  "depends": {"fabricloader": ">=0.19.5", "minecraft": "26.2", "java": ">=25", "fabric-api": "*"}
+}

@@ -1,0 +1,9 @@
+.cache/
+runtime/
+client-mod/.gradle/
+client-mod/build/
+client-mod/run/
+client-mod/libs/
+legacy/
+zenith/
+viaproxy/
