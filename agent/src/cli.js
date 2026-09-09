@@ -6,20 +6,47 @@ import { runGate1 } from './gate1.js';
 import { runBench } from './bench.js';
 import { root, openSession } from './setup.js';
 import { CraftingTools } from './crafting.js';
+import { DependencyPlanner, parseObtainGoal, formatDependencyPlan } from './dependencies.js';
+import { SkillExecutor } from './skills.js';
 const args = process.argv.slice(2);
 const { config, bridge, agent, log } = await openSession({ args, name: 'events',
   emit: event => console.log(event.message ?? `${event.state?.phase}: ${event.state?.reason}`) });
 const input = createInterface({ input: process.stdin, output: process.stdout });
 const crafting = new CraftingTools(bridge);
+const dependencies = new DependencyPlanner();
+const skills = new SkillExecutor(bridge,message=>{console.log(message);log.emit({kind:'skill-progress',message});});
+let skillAbort;
 let closing = false, lastError = '', nextSample = 0, busy = false;
-async function shutdown() { if (closing) return;closing=true;try { await agent.stop(); } catch {}input.close();log.close(); }
+async function shutdown() { if (closing) return;closing=true;skillAbort?.abort();try { await agent.stop(); } catch {}input.close();log.close(); }
 process.on('SIGINT', shutdown);process.on('SIGTERM', shutdown);input.on('close', shutdown);
 input.on('line', line => {
+  if(line.trim().toLowerCase()==='cancel') line='stop';
+  if(line.trim()==='help') console.log('Goals: get|fetch|gather|collect|craft <count> <item> | plan <count> <item> | cancel. Examples: get 6 logs, craft stone pickaxe, plan 10 planks.');
   if (line.trim()==='quit') { void shutdown();return; }
   if (line.trim()==='help') {console.log('inventory | craftable | can-craft <item> | go to 200 200 | go to site | forward|back|left|right [ticks] | turn 90 | face <yaw> <pitch> | jump | slot 0-8 | break [ticks] | place | status | look [radius] | history | frame | reflex on|off | respawn | gate1 | bench [routes] | stop | quit. Return to Minecraft and close the menu to start a queued command. F8 takes over.');return;}
   // Observation is read-only and deliberately bypasses the supervisor: looking must never
   // cancel, extend or start an action, so it does not touch action authority at all.
   const [word, ...rest] = line.trim().split(/\s+/);
+  const goal = parseObtainGoal(line);
+  if(word==='stop') skillAbort?.abort();
+  if(goal && word!=='plan') {
+    if(busy || agent.active) {console.error('An action is running. Type stop first.');return;}
+    busy=true;skillAbort=new AbortController();
+    void skills.run(goal,skillAbort.signal).catch(error=>console.error(`Goal stopped: ${error.message}`))
+      .finally(async()=>{try {await bridge.stop();} catch {}busy=false;skillAbort=null;});return;
+  }
+  if (goal) {
+    void crafting.inventory().then(snapshot=>{
+      const plan=dependencies.plan(goal.item,goal.count,snapshot.craftingItems,{stations:snapshot.stations??[]});
+      log.emit({kind:'dependency-plan',observedAt:snapshot.observedAt,session:snapshot.session,plan});
+      console.log(formatDependencyPlan(plan));
+    }).catch(error=>{
+      const plan=dependencies.plan(goal.item,goal.count,{});
+      log.emit({kind:'dependency-plan',offline:true,error:error.message,plan});
+      console.error(`Live inventory unavailable (${error.message}); showing an empty-inventory preview.`);
+      console.log(formatDependencyPlan(plan));
+    });return;
+  }
   if (word==='inventory' || word==='craftable' || word==='can-craft') {
     const query=word==='inventory'?crafting.inventory():word==='craftable'?crafting.craftable():crafting.canCraft(rest.join(' '));
     void query.then(result=>console.log(JSON.stringify(result,null,2))).catch(error=>console.error(error.message));return;
@@ -39,6 +66,7 @@ input.on('line', line => {
     return;
   }
   if (word==='frame') {void frame().catch(e=>console.error(e.message));return;}
+  if(busy && word!=='stop' && word!=='status') {console.error('A skill or harness is running. Type stop first.');return;}
   void agent.order(line).then(state => {if(state) console.log(JSON.stringify(state,null,2));}).catch(e => {if(e.name!=='AbortError') console.error(e.message);});
 });
 async function look(radius) {

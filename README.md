@@ -129,3 +129,10 @@ Private JSONL logs are written to `runtime/events-*.jsonl`. A submitted goal, ch
 The navigation candidate is an unofficial Baritone 26.2 fork pinned by checksum. Its initial load is verified, but terrain trials and the checks in [evals/navigation.md](evals/navigation.md) remain necessary. There is no automatic retry loop for blocked routes. Loss of agent heartbeat cancels movement after three seconds plus client tick scheduling.
 
 The bridge exposes no mining, placement, container or attack action. Navigation settings prohibit breaking and placement. These restrictions apply to bridge-issued navigation; they do not restrict the human player's own inputs or other independently installed mods.
+# Dependency-plan previews
+
+Start `./windove` with Minecraft joined. `plan iron pickaxe` and `plan 12 dirt` are read-only previews. `can you create 10 planks`, `craft sticks`, or `create a wooden pickaxe` now execute skills and replan from updated inventory after each step. `inventory`, `craftable`, and `can-craft iron_pickaxe` remain read-only queries. No model download is required.
+
+Install the updated client using `./windove build`, restart Minecraft and rejoin before executing skills. Return to gameplay and close the pause menu after entering the request. `stop`, Ctrl+C and F8 cancel execution. This is a gameplay-testing MVP: gathering searches only local loaded blocks, stations must remain nearby, and furnace processing supports raw iron with coal in an empty furnace. Failed steps stop with a reason; interrupted furnace contents remain in the world. Compilation and service tests do not establish live-game reliability.
+
+If the client bridge is not running on `127.0.0.1:3009`, goal previews automatically fall back to an explicit empty-inventory plan. Commands that need live state (`inventory`, `craftable`, `look`, movement) still require Minecraft and the bridge mod to be active.

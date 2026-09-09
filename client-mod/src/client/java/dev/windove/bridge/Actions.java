@@ -18,7 +18,7 @@ import java.util.Set;
  * rejected before it can reach a tick. The tick revalidates preconditions regardless.
  */
 final class Actions {
-    static final Set<String> TYPES = Set.of("navigate", "move", "look", "jump", "select", "respawn", "break", "place");
+    static final Set<String> TYPES = Set.of("navigate", "move", "look", "jump", "select", "respawn", "break", "place", "skill");
     static final Set<String> DIRECTIONS = Set.of("forward", "back", "left", "right");
     /** Forbids breaking and placement. Relocation always runs here, so travel cannot change terrain. */
     static final String SCOPE_TRAVEL = "travel";
@@ -28,7 +28,7 @@ final class Actions {
      * It is not a location restriction: where to test is the operator's decision.
      */
     static final String SCOPE_BUILD = "build";
-    static final Set<String> BUILD_TYPES = Set.of("break", "place");
+    static final Set<String> BUILD_TYPES = Set.of("break", "place", "skill");
     /**
      * Typed failure. Free text cannot be matched against a remedy later, which is the whole
      * mechanism MineEvolve's gains rest on, so every non-success carries one of these.
@@ -51,6 +51,19 @@ final class Actions {
         if (request.has("assumes")) validateAssumptions(request.getAsJsonObject("assumes"));
         JsonObject args = request.has("args") && request.get("args").isJsonObject() ? request.getAsJsonObject("args") : new JsonObject();
         switch (type) {
+            case "skill" -> {
+                if(!Set.of("gather","craft","deploy_station","smelt").contains(string(args,"kind"))) throw new IllegalArgumentException("Unsupported skill");
+                if(!string(args,"item").matches("minecraft:[a-z0-9_]+")) throw new IllegalArgumentException("Invalid item");
+                if(number(args,"count")<1 || number(args,"count")>256) throw new IllegalArgumentException("Invalid count");
+                if(string(args,"kind").equals("smelt") && (!string(args,"item").equals("minecraft:iron_ingot") || number(args,"count")>8)) throw new IllegalArgumentException("Smelting supports 1..8 iron ingots");
+                if(string(args,"kind").equals("gather") && (!args.has("blocks") || args.getAsJsonArray("blocks").size()>32)) throw new IllegalArgumentException("Invalid blocks");
+                if(string(args,"kind").equals("craft")) {
+                    long width=number(args,"width");
+                    if(width<1 || width>3 || args.getAsJsonArray("grid").size()>9 || args.getAsJsonArray("grid").size()%width!=0) throw new IllegalArgumentException("Invalid grid");
+                    if(!Set.of("inventory","crafting_table").contains(string(args,"station"))) throw new IllegalArgumentException("Invalid station");
+                    if(string(args,"station").equals("inventory") && (width>2 || args.getAsJsonArray("grid").size()/width>2)) throw new IllegalArgumentException("Grid exceeds inventory");
+                }
+            }
             case "navigate" -> {
                 double x = decimal(args, "x"), z = decimal(args, "z");
                 if (x != Math.rint(x) || z != Math.rint(z)) throw new IllegalArgumentException("Coordinates must be integers");

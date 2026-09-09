@@ -48,9 +48,11 @@ with zipfile.ZipFile(source) as archive:
         if not result.get('id') or result.get('components') or any(not slot for slot in slots if kind.endswith('shapeless')):
             unsupported.append(path)
             continue
+        slots = slots + [[] for unused in range(width * height - len(slots))]
         recipes.append({'id': 'minecraft:' + pathlib.PurePosixPath(path).stem,
                         'output': result['id'], 'count': result.get('count', 1),
                         'station': 'inventory' if width <= 2 and height <= 2 else 'crafting_table',
+                        'width': width, 'height': height, 'grid': slots,
                         'slots': [slot for slot in slots if slot]})
     output = root / 'config/recipes-26.2.json'
     output.write_text(json.dumps({'version': '26.2', 'source': 'vanilla game jar; server datapacks may differ',

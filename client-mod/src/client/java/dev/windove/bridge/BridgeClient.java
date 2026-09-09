@@ -61,6 +61,7 @@ public final class BridgeClient implements ClientModInitializer {
     private double lastX, lastZ;
     private String activeType="", moveDirection="";
     private int actionTicksLeft;
+    private Skills skill;
     private boolean leftGround;
     private double peakY;
     private JsonObject beforeSnapshot=new JsonObject(), assumes;
@@ -356,6 +357,7 @@ public final class BridgeClient implements ClientModInitializer {
     private void finish(String status, String failureClass, String why, boolean changesAuthority) {
         failure=status.equals("succeeded")?Actions.FAIL_NONE:failureClass;
         if(!activeType.isEmpty()) {
+            if(skill!=null) {skill.close(client);skill=null;}
             try {var b=BaritoneAPI.getProvider().getPrimaryBaritone();b.getPathingBehavior().forceCancel();b.getInputOverrideHandler().clearAllKeys();} catch (LinkageError|RuntimeException ignored) {}
             releaseHeldKeys();
             if(activeType.equals("break") && client!=null && client.gameMode!=null) client.gameMode.stopDestroyBlock();
@@ -430,7 +432,7 @@ public final class BridgeClient implements ClientModInitializer {
                     maxStopReleaseTicks=Math.max(maxStopReleaseTicks,stopReleaseTicks);stopReceivedTick=-1;
                 }
             }
-            if(!activeType.isEmpty() && !activeType.equals("respawn") && (mc.player==null||dead||mc.gui.screen()!=null||mc.isPaused())) halt(dead?"Player died":"World unavailable, menu opened or paused");
+            if(!activeType.isEmpty() && !activeType.equals("respawn") && (mc.player==null||dead||(mc.gui.screen()!=null && !(skill!=null && skill.ownsMenu(mc)))||mc.isPaused())) halt(dead?"Player died":"World unavailable, menu opened or paused");
             if(!activeType.isEmpty() && now>leaseUntil) halt("Agent heartbeat lost");
             runReflexes(mc,f8);
             // Hold a queued command while the safety tier owns the body; start it when it lets go.
@@ -449,6 +451,7 @@ public final class BridgeClient implements ClientModInitializer {
                 started=lastMovement=now;activeType=requested;
                 progress.reset(remainingWork(mc,requested,args));
                 switch(requested) {
+                    case "skill" -> {restrictNavigation();skill=new Skills(mc,args);phase="skill";reason="Executing "+args.get("kind").getAsString();}
                     case "navigate" -> {
                         restrictNavigation();
                         targetX=args.get("x").getAsInt();targetZ=args.get("z").getAsInt();
@@ -509,6 +512,12 @@ public final class BridgeClient implements ClientModInitializer {
                 if(!broken.isEmpty()) finish("blocked",Actions.FAIL_ASSUMPTION,"Assumption no longer holds: "+broken);
                 else if(now-started>deadlineMs && !activeType.equals("navigate")) finish("blocked",Actions.FAIL_DEADLINE,"Action deadline exceeded");
                 else switch(activeType) {
+                    case "skill" -> {
+                        try {
+                            String result=skill.tick(mc);
+                            if(result!=null) finish("succeeded",Actions.FAIL_NONE,result);
+                        } catch(RuntimeException error) {finish("blocked",Actions.FAIL_PRECONDITION,error.getMessage());}
+                    }
                     case "navigate" -> {
                         restrictNavigation();
                         if(Math.hypot(mc.player.getX()-lastX,mc.player.getZ()-lastZ)>0.3) {lastMovement=now;lastX=mc.player.getX();lastZ=mc.player.getZ();reason="Client position changed (predicted)";}
@@ -545,10 +554,11 @@ public final class BridgeClient implements ClientModInitializer {
             JsonObject state=new JsonObject();state.addProperty("protocol",3);state.addProperty("observedAt",now);state.addProperty("epoch",epoch.get());state.addProperty("session",session);
             state.addProperty("online",mc.player!=null);state.addProperty("phase",phase);state.addProperty("reason",reason);state.addProperty("actionId",actionId);
             state.addProperty("canAct",mc.player!=null && mc.gui.screen()==null && !mc.isPaused() && mc.player.getHealth()>0);
+            state.addProperty("skillsVersion",1);
             state.addProperty("reflexArmed",reflexArmed);state.addProperty("reflex",activeReflex);state.addProperty("reflexCount",reflexCount);
             JsonObject queued=pending.get();
             state.addProperty("pendingActionId",queued==null?"":queued.get("actionId").getAsString());
-            state.addProperty("bridgeBuild","reflex-recovery-2");
+            state.addProperty("bridgeBuild","shallow-gather-return-2");
             state.addProperty("progress",progress.score());state.addProperty("stagnantTicks",progress.stagnantTicks());
             state.addProperty("failure",failure);
             state.addProperty("singleplayer",singleplayer);state.addProperty("buildScopeAvailable",singleplayer);

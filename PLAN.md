@@ -1,5 +1,56 @@
 # Minecraft agent redesign
 
+## Gathering policy correction — 2026-09-09
+
+Build `shallow-gather-return-2` supersedes the escape-reserve policy below. The depth-dependent cobblestone quota could increase as the miner descended, driving more excavation. It is removed. Requested gathering materials are excluded from scaffold items, so cobblestone gathered for crafting is not spent returning. Other configured scaffold materials remain available. Direct downward digging is disabled and placement receives a higher path cost. Logs, dirt and cobblestone target searches are limited to three blocks below the starting elevation through Baritone's mining Y settings; this bounds target choice, not every intermediate path position. Dedicated deep-ore expeditions still need a separate access-route policy.
+
+Return goals accept any currently clear, supported, dry standing position within four blocks horizontally and one vertically of the start. They do not require restoring the exact block the player originally stood on. Material count is checked after return; shortfalls produce a failure instead of automatically starting another excavation cycle. No shallow target or usable return route can still fail the job explicitly.
+
+The console now recognizes `get`, `fetch`, `gather` and `collect`, plus `logs`/`log`, `cobble`, and `cancel`. Generic logs choose an already-held supported species, otherwise oak; this is not yet world-aware selection among tree species.
+
+Next pathfinding increment: rank harvesting sites by estimated approach, excavation, pickup and exit cost; plan ingress/egress before committing; remember failed sites; record path stalls and replan from changed terrain. These are not implemented by the settings correction. Validate the current build in leaf-obstructed trees, dirt-covered shallow stone and uneven return areas before calling it reliable.
+
+## Mining access and return — 2026-09-09
+
+Build `mining-access-return-1` replaces direct target breaking with Baritone's mining process. Skill paths may clear intervening leaves, grass, dirt and other blocks; automatic tool selection and inventory transfers are enabled. Each gather records its starting position and returns there before reporting success. Paths can excavate and pillar using dirt, cobblestone, cobbled deepslate or netherrack. Cobblestone gathering requests an extra vertical-depth allowance for escape blocks and rechecks retained material after returning. Failed return paths are reported explicitly. This is a resource allowance, not proof that every terrain configuration has a route.
+
+Skill exit cancels the mining/path processes and restores the previous navigation settings, including on takeover and failure. Nearby tables/furnaces are observed within 24 horizontal and 12 vertical blocks and supplied to each replan; restarting a goal can reuse existing stations. Placement searches a volume around the player rather than four fixed ground positions. Station observations cache for up to one second and invalidate when a skill ends.
+
+Validation: 83 Node tests pass, including reuse of an observed crafting table; the mod compiles and installs. Live obstacle clearing, hotbar recovery and underground return require testing after Minecraft reloads this build. Baritone's target discovery and path search replace the old 12-block gather limit; ore search is still bounded by the action deadline and available world data.
+
+## Skill execution MVP — 2026-09-09
+
+Implemented a client-tick `Skills` controller and serial `SkillExecutor`. Conversational obtain/craft/create requests now execute; `plan <item>` remains a read-only preview. The executor refreshes inventory and expands the remaining goal after every skill, preserves deployed-station knowledge within the run, checks session/epoch ownership, and stops on a failed leaf rather than repeating it. No model is required. Plural `sticks` and generic `planks` are resolved (planks prefer a wood type already in inventory).
+
+Skills: local block discovery, Baritone approach, reach/raycast-checked breaking, harvest-tool checks and inventory-gain completion; nearby station placement/reuse; inventory/table recipe grids populated via ordinary container inputs; and raw iron/coal furnace batches of up to eight ingots. Crafting grids retain recipe geometry. Skills share the existing action lease, deadlines, stop/F8 and death cancellation. Closing an owned crafting menu uses vanilla cleanup, not item injection. Furnace interruptions leave deposited material in the furnace.
+
+Limitations: this is an unvalidated gameplay MVP, not reliable autonomous iron acquisition. Discovery is limited to loaded blocks within 12 horizontal and six vertical blocks, no underground exploration or persistent station map. Paths cannot excavate access tunnels. Block collection may fail when drops cannot be reached; stations beyond the local scan require returning nearer. Furnace input currently requires a single sufficient raw-iron stack, an empty furnace and coal fuel. It does not recover interrupted furnace jobs. Inventory-delta checks use client inventory updates, not an independent server oracle. Skills do not resume after death or takeover. Preview DAGs still report `executable:false` because world preconditions are not established by planning alone.
+
+Validation: 80 Node tests pass; client compilation succeeds. These are not live gameplay acceptance results. Restart Minecraft after installing the new jar before testing. Start with logs to planks, then sticks, then wooden/stone pickaxe before attempting the iron chain. Remaining improvements: live skill fixtures and acknowledgement edge cases; resource exploration and remembered stations; recovery of partially filled containers; persistent goal hierarchy and risk-aware alternative selection.
+
+## Dependency planning — 2026-09-09
+
+Implemented `agent/src/dependencies.js`: bounded symbolic backward chaining over vanilla crafting recipes and a small acquisition-method set (logs, dirt, cobblestone, coal, raw iron, diamond, and raw-iron smelting). Conversational console requests such as `can you create an iron pickaxe?` and `plan 12 dirt` generate read-only plans against fresh inventory. This is a limited intent parser, not general conversational goal understanding. The autonomous `run` loop does not yet execute these plans.
+
+The method library is an AND/OR graph: all ingredients and stations are prerequisites, while recipes and acquisition sources are alternatives. A selected plan is an ordered dependency DAG with quantities, consumed materials, retained tools, shared deployed stations, output batches and leftovers. From empty inventory the iron-pickaxe preview gathers three logs, eleven cobblestone, three raw iron and one coal; it includes a crafting table, wooden and stone pickaxes, and furnace. Ore availability, accessibility and tool durability are unresolved runtime conditions, not proven by a recipe plan.
+
+Research basis:
+- [Optimus-1](https://arxiv.org/html/2408.03615v1) uses a hierarchical directed knowledge graph for task dependencies and retrieves/topologically orders task-related subgraphs. Its knowledge-guided decomposition is directly relevant here. This corrects any earlier implication that these systems only ask an LLM for isolated primitive actions. We borrow the planning representation, not its control-loop performance claims.
+- [DEPS](https://arxiv.org/abs/2302.01560) combines execution feedback, plan correction and subgoal selection. Adopt explicit failure outcomes and feasibility-based selection rather than repeating impossible leaves.
+- [Voyager](https://voyager.minedojo.org/) motivates persistent executable skill reuse and feedback-based improvement. Store verified skills separately from generated task plans.
+- [SHOP/SHOP2](https://www.cs.umd.edu/projects/shop/description.html) supplies the older hierarchical task-network foundation: parameterized decomposition methods with preconditions. This is established planning machinery, not a new SOTA claim.
+
+Reuse: cache item-to-method expansion, not an executable plan keyed only by item. Feasibility depends on inventory quantities, shared reservations, tool condition, available stations and world observations. The current implementation uses bounded backtracking with cycle rejection, not globally optimal dynamic programming. Future search can memoize full relevant planning states and rank alternatives by travel, tool cost and risk. A search-limit result is not proof of impossibility.
+
+Execution work remaining, in order:
+1. Structured crafting transactions: preserve recipe grid layout in the exporter; select inventory/table menu, place ingredients through ordinary client interactions, await server updates, recover leftovers and verify net output. No inventory injection.
+2. `gather(item,count)`: discover loaded candidate blocks, navigate into reach, select a valid tool, aim/break, collect drops, and verify inventory increase. Return typed unreachable/no-source/tool-required/inventory-full outcomes. Structured block state can handle basic mining without a VLM.
+3. Station placement/opening and furnace transactions: insert ore/fuel, track actual processing and retrieve output. The preview currently supports coal fuel only and assumes continuous batches; it does not model residual furnace burn time.
+4. A serial skill scheduler with cancellation and durable goal state: run ready leaves, reobserve after each, invalidate stale reservations on interruption/death, and replan unmet requirements. DAG nodes are not permission to run simultaneous inventory mutations.
+5. General chat intent extraction into typed goals, then persistent project/subgoal hierarchy. The LLM chooses goals and alternatives; deterministic tools own recipe arithmetic and execution verification.
+
+Validation: 73 service tests pass, including resource-ledger replay of the empty-inventory iron-pickaxe plan. This proves neither live mining nor crafting. All previews report `executable: false` until skill executors are connected.
+
 ## Skill foundation — inventory and recipes
 
 Implemented read-only `CraftingTools.inventory()`, `craftable()` and `canCraft(item)`, exposed in the console as `inventory`, `craftable` and `can-craft <item>`. Inventory is aggregated by registry ID; crafting previews use the main inventory and hotbar, excluding equipped/offhand items. The static 26.2 catalog is extracted from the installed vanilla game jar. Standard shaped/shapeless recipes are supported; special, cooking and component-bearing output recipes are explicitly outside this first catalog. Server datapacks may differ.
