@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 import java.util.*;
 import net.minecraft.client.Minecraft;

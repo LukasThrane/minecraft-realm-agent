@@ -1,2 +1,2 @@
 pluginManagement { repositories { maven { url = 'https://maven.fabricmc.net/' }; gradlePluginPortal() } }
-rootProject.name = 'windove-bridge'
+rootProject.name = 'realm-agent-bridge'

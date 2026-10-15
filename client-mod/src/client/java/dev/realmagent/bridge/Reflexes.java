@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.component.DataComponents;

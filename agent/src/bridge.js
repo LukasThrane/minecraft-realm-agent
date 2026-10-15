@@ -23,7 +23,7 @@ export class Bridge {
     const response = await this.fetch(this.url + '/frame', { headers: { Authorization: `Bearer ${this.token}` }, signal: AbortSignal.timeout(4000) });
     if (response.status === 404 || response.status === 503) throw Error(`No frame available: ${(await response.json()).error ?? response.status}`);
     if (!response.ok) throw Error(`Bridge ${response.status}: ${await response.text()}`);
-    const header = name => response.headers.get(`x-windove-${name}`);
+    const header = name => response.headers.get(`x-realm-agent-${name}`);
     return { bytes: Buffer.from(await response.arrayBuffer()), capturedAt: Number(header('captured-at')), ageMs: Number(header('age-ms')),
       fresh: header('fresh') === 'true', width: Number(header('width')), height: Number(header('height')), session: header('session') };
   }

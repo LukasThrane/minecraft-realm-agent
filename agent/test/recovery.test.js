@@ -5,7 +5,7 @@ import { Supervisor } from '../src/supervisor.js';
 import { validateAction, directCommand } from '../src/commands.js';
 function fixture(over = {}) {
   const state = { online:true, canAct:false, navigationAvailable:true, session:'w', epoch:4, phase:'stopped',
-    x:10, y:64, z:20, dead:true, deathScreen:true, hardcore:false, canRespawn:true, deathMessage:'Windove was slain by a zombie',
+    x:10, y:64, z:20, dead:true, deathScreen:true, hardcore:false, canRespawn:true, deathMessage:'Steve was slain by a zombie',
     deaths:1, lastDeathAt:1000, lastRespawnAt:0, ...over };
   const calls = [];
   const bridge = { state: async () => ({ ...state, observedAt: Date.now() }),

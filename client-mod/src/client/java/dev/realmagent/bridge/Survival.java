@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 import com.google.gson.*;
 import java.util.*;

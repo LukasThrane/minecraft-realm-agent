@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 /**
  * Tick-rate progress scoring, so stagnation is measured rather than guessed and the model can be

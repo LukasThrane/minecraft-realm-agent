@@ -26,7 +26,7 @@ export function loadConfig(args) {
   config.modelEnabled = args.includes('--model');
   config.charter = loadCharter();
   const tokenFile = flag(args, '--token-file')
-    ?? resolve(root, args.includes('--dev') ? '../client-mod/run/config/windove-bridge-token.txt' : '../runtime/realm-client/config/windove-bridge-token.txt');
+    ?? resolve(root, args.includes('--dev') ? '../client-mod/run/config/realm-agent-bridge-token.txt' : '../runtime/realm-client/config/realm-agent-bridge-token.txt');
   let token;
   try { token = readFileSync(tokenFile, 'utf8').trim(); }
   catch { console.error(`Start the client bridge first. Token file missing: ${tokenFile}`); process.exit(1); }

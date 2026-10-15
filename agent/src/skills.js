@@ -226,7 +226,7 @@ export class SkillExecutor {
   async run(goal, signal, options = {}) {
     const authority=await this.bridge.state();
     if(authority.reflexArmed && authority.survivalVersion!==1) throw Error('Client survival logic is out of date. Build and restart Minecraft before autonomous work.');
-    if(![3,4].includes(authority.skillsVersion)) throw Error('Client skills unavailable or out of date. Run ./windove build and restart Minecraft.');
+    if(![3,4].includes(authority.skillsVersion)) throw Error('Client skills unavailable or out of date. Run ./realm-agent build and restart Minecraft.');
     if(authority.acting || authority.pendingActionId) throw Error('Stop the current action before starting a skill goal');
     // The client remembers stations by position now, so the snapshot is the authority. This used
     // to be cleared and refilled from a scan around the player, which meant a table we had just

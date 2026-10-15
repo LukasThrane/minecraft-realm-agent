@@ -101,7 +101,7 @@ test('unconfirmed release retains ownership and refuses replacement',async()=>{
   await assert.rejects(h.runner.start(gather),/owns the body/);
 });
 test('restart preserves dialogue and plan but suspends active tasks',()=>{
-  const directory=mkdtempSync(join(tmpdir(),'windove-memory-'));
+  const directory=mkdtempSync(join(tmpdir(),'realm-agent-memory-'));
   try {
     const path=join(directory,'memory.json');const memory=new AgentMemory(path);
     memory.setPlan([objective()],0);memory.message('user','Do not make another pickaxe');

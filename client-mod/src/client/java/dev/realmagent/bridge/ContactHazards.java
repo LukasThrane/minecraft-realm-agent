@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 /** Conservative short-horizon contact check, independent of pathfinder cost preferences. */
 final class ContactHazards {

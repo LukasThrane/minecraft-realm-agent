@@ -588,7 +588,7 @@ async function main() {
   const { openSession, flag } = await import('./setup.js');
   const args = process.argv.slice(2);
   const goal = args.filter(a => !a.startsWith('--') && a !== flag(args, '--cycle') && a !== flag(args, '--every')).join(' ').trim();
-  if (!goal) { console.error('Give a goal, for example: ./windove run "walk to 200 200"'); process.exit(2); }
+  if (!goal) { console.error('Give a goal, for example: ./realm-agent run "walk to 200 200"'); process.exit(2); }
   // A run prints continuously while the operator is typing into the same terminal. Without
   // redrawing the input line, every log line shreds whatever is half-typed: a live run turned
   // "nah wait get 4 logs instead" into six fragments scattered through the output, and the

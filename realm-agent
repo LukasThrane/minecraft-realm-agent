@@ -1,14 +1,14 @@
 #!/bin/bash
 # Single entry point. Everything else is a subcommand.
 #
-#   ./windove              private console (build, install and test first if needed)
-#   ./windove run "<goal>" autonomous run: a persistent goal, model in the goal loop only
-#   ./windove gate1        PLAN gate 1: client and control baseline
-#   ./windove bench 20     PLAN gate 2: navigation routes
-#   ./windove build        rebuild the mod and install it into the Realm instance
-#   ./windove test         node service tests
-#   ./windove options      set client options (run with Minecraft closed)
-#   ./windove install      install the launcher profile (run with the launcher closed)
+#   ./realm-agent              private console (build, install and test first if needed)
+#   ./realm-agent run "<goal>" autonomous run: a persistent goal, model in the goal loop only
+#   ./realm-agent gate1        PLAN gate 1: client and control baseline
+#   ./realm-agent bench 20     PLAN gate 2: navigation routes
+#   ./realm-agent build        rebuild the mod and install it into the Realm instance
+#   ./realm-agent test         node service tests
+#   ./realm-agent options      set client options (run with Minecraft closed)
+#   ./realm-agent install      install the launcher profile (run with the launcher closed)
 #
 # gate1 and bench are also console commands, so you rarely need them here.
 set -euo pipefail
@@ -26,7 +26,7 @@ case "$command" in
   install)  exec python3 "$ROOT/scripts/install-launcher.py" "$@" ;;
   build)
     "$ROOT/scripts/build.sh"
-    cp "$ROOT/client-mod/build/libs/windove-bridge-0.1.0.jar" "$ROOT/runtime/realm-client/mods/"
+    cp "$ROOT/client-mod/build/libs/realm-agent-bridge-0.1.0.jar" "$ROOT/runtime/realm-client/mods/"
     echo "Installed. Restart Minecraft to load it." ;;
   *) echo "Unknown command: $command"; sed -n '2,12p' "$0"; exit 2 ;;
 esac

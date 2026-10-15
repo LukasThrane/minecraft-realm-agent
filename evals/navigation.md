@@ -13,7 +13,7 @@ Use a disposable local world. No Realm connection is necessary. Record results h
 
 ## Automated run
 
-`bench 20` in the console (or `./windove bench --trials 20 --distance 120`) walks 120-block legs in successive directions from wherever the character stands, cancels every fourth leg mid-route to measure release latency and post-stop drift, and writes `runtime/bench-<stamp>.jsonl` plus a `runtime/bench-<stamp>.md` table. It prompts before moving anything; `--yes` skips the prompt. Ctrl+C stops the bot and keeps the trials that ran.
+`bench 20` in the console (or `./realm-agent bench --trials 20 --distance 120`) walks 120-block legs in successive directions from wherever the character stands, cancels every fourth leg mid-route to measure release latency and post-stop drift, and writes `runtime/bench-<stamp>.jsonl` plus a `runtime/bench-<stamp>.md` table. It prompts before moving anything; `--yes` skips the prompt. Ctrl+C stops the bot and keeps the trials that ran.
 
 The harness covers steps 3, 5 and 7 and the terminal-`stop` half of step 4. It does not cover F8, disconnect or service termination (step 4), block-change auditing (step 6), or terrain selection — legs are direction-varied, not terrain-controlled. Run those by hand and record them alongside the generated table.
 

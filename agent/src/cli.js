@@ -33,7 +33,7 @@ const { config, bridge, agent, log } = await openSession({ args, name: 'events',
   emit: event => console.log(`${stamp()} ${event.message ?? `${event.state?.phase}: ${event.state?.reason}`}`) });
 const input = createInterface({ input: process.stdin, output: process.stdout });
 const skills = new SkillExecutor(bridge, message => { console.log(message); log.emit({ kind: 'skill-progress', message }); });
-// One implementation of the look-only commands, shared with `./windove run`, so they behave the
+// One implementation of the look-only commands, shared with `./realm-agent run`, so they behave the
 // same in both places and neither can quietly forget one.
 const views = queries({ bridge, attempts: skills.attempts, log: event => log.emit(event) });
 let skillAbort;

@@ -73,7 +73,7 @@ journals modes, events, separation, turn rate, sprint state and assessment laten
 
 **Live regressions found while validating this build, and fixed.**
 
-- `./windove run` armed the new build and the client tick threw once, reported only as
+- `./realm-agent run` armed the new build and the client tick threw once, reported only as
   `Controller error: RuntimeException`. The catch recorded the class name and nothing else, and the
   error snapshot was overwritten by the next successful tick, so the fault was undiagnosable. The
   controller now logs the full stack trace to the client log and republishes it as
@@ -475,7 +475,7 @@ retargeting during a furnace or crafting transaction leaves a menu open.
 
 ## First autonomous run, and what it exposed — 2026-09-09
 
-`./windove run --model "get a stone pickaxe"` completed the full chain unattended on the first
+`./realm-agent run --model "get a stone pickaxe"` completed the full chain unattended on the first
 attempt: gather log, craft planks, craft and place a crafting table, gather more logs, craft sticks,
 craft a wooden pickaxe, gather cobblestone with it, craft the stone pickaxe. Step 2 works — the
 model chose `obtain` rather than reaching for `break` and `place`, answered `continue` while the job

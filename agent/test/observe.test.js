@@ -31,7 +31,7 @@ test('no world connected is not rendered as an empty but healthy world',()=>{
 });
 test('frame fetch surfaces the client-reported age and refuses non-image replies',async()=>{
  const png=Buffer.from([0x89,0x50,0x4e,0x47]);
- const headers=new Headers({'x-windove-captured-at':'1000','x-windove-age-ms':'240','x-windove-fresh':'true','x-windove-width':'640','x-windove-height':'360'});
+ const headers=new Headers({'x-realm-agent-captured-at':'1000','x-realm-agent-age-ms':'240','x-realm-agent-fresh':'true','x-realm-agent-width':'640','x-realm-agent-height':'360'});
  const ok=new Bridge({url:'http://127.0.0.1:3009',token:'t',fetchImpl:async()=>new Response(png,{status:200,headers})});
  const frame=await ok.frame();
  assert.deepEqual([frame.ageMs,frame.fresh,frame.width],[240,true,640]);

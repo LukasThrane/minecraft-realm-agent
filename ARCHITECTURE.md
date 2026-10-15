@@ -1,6 +1,6 @@
 # Agent-owned Minecraft execution
 
-Autonomous `./windove run` now has one strategic owner. An agent authors a persistent hierarchical plan and explicitly starts one substantial task at a time. Plan entries never become an executable queue. Completing a task wakes the agent; it does not start another objective.
+Autonomous `./realm-agent run` now has one strategic owner. An agent authors a persistent hierarchical plan and explicitly starts one substantial task at a time. Plan entries never become an executable queue. Completing a task wakes the agent; it does not start another objective.
 
 ## Runtime and authority
 
@@ -41,11 +41,11 @@ The executor can perform mechanical steps inside the task the agent selected. It
 
 Gathering and staircase execution check the player’s projected path against contact hazards before continuing movement. Baritone is configured to avoid lava, fire, magma and campfires and to disable parkour. These guards need terrain testing in-game; unit coverage is not proof of safe navigation.
 
-Each run serves a read-only localhost inspector with exact model prompts, streamed output, optional model-returned reasoning, timings, tool results and task state. `./windove debug` follows the saved trace across runs. Defaults are 4096 context tokens, 650 output tokens (180 for replies), with compact mission/objective target references.
+Each run serves a read-only localhost inspector with exact model prompts, streamed output, optional model-returned reasoning, timings, tool results and task state. `./realm-agent debug` follows the saved trace across runs. Defaults are 4096 context tokens, 650 output tokens (180 for replies), with compact mission/objective target references.
 
 ## Testing
 
-Run `./windove test` for host regressions and `./windove build` to build, run the client checks and install the jar into the Realm instance. Restart Minecraft to load skills protocol 4.
+Run `./realm-agent test` for host regressions and `./realm-agent build` to build, run the client checks and install the jar into the Realm instance. Restart Minecraft to load skills protocol 4.
 
 `node scripts/agent-smoke.mjs` exercises the real configured Ollama model through the worker with a simulated body. It never connects to Minecraft and stops on the first authorized task or after four minutes. Add `--interrupt` to ask it to pause that task and eat at 6 health and 19 hunger, still using a simulated body. Model planning quality is separate from controller correctness; inspect its plan and chosen task rather than treating valid JSON as mission success.
 

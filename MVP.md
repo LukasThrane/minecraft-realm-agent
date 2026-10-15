@@ -19,7 +19,7 @@ This is a navigation testing MVP, not an autonomous survival agent. A successful
 | --- | --- |
 | `client-mod/settings.gradle`, `build.gradle`, `gradle.properties` | Pinned Fabric build and split client sources; Java release 25. |
 | `client-mod/src/main/resources/fabric.mod.json` | Client-only mod declaration. |
-| `client-mod/src/client/java/dev/windove/bridge/BridgeClient.java` | Loopback transport and tick-owned navigation lifecycle. Future skills must go through this same cancellation/permission boundary. |
+| `client-mod/src/client/java/dev/realmagent/bridge/BridgeClient.java` | Loopback transport and tick-owned navigation lifecycle. Future skills must go through this same cancellation/permission boundary. |
 | `config/dependencies.json` | Pinned versions and Baritone artifact SHA-256. |
 | `config/mvp.json` | Bridge URL, site and optional local model configuration. |
 | `agent/package.json` | Dependency-free Node ESM service and test commands. |
@@ -32,22 +32,22 @@ This is a navigation testing MVP, not an autonomous survival agent. A successful
 | `agent/src/setup.js` | Config and per-instance bridge token loading shared by every console. |
 | `agent/src/bench.js` | Repeated-route acceptance harness over the same supervisor; reports measurements, never claims them. |
 | `agent/src/observe.js` | Observation formatting and staleness rules. The text a planner reads; no control authority. |
-| `client-mod/src/client/java/dev/windove/bridge/Reflexes.java` | Safety tier: threat retreat and eating, evaluated on the tick. Deterministic, no model. |
-| `client-mod/src/client/java/dev/windove/bridge/Progress.java` | Tick-rate progress scoring, so stagnation is measured rather than guessed. |
-| `client-mod/src/client/java/dev/windove/bridge/Actions.java` | Action envelope: validation, before/after snapshots and evidence. One place to add a skill. |
+| `client-mod/src/client/java/dev/realmagent/bridge/Reflexes.java` | Safety tier: threat retreat and eating, evaluated on the tick. Deterministic, no model. |
+| `client-mod/src/client/java/dev/realmagent/bridge/Progress.java` | Tick-rate progress scoring, so stagnation is measured rather than guessed. |
+| `client-mod/src/client/java/dev/realmagent/bridge/Actions.java` | Action envelope: validation, before/after snapshots and evidence. One place to add a skill. |
 | `agent/src/gate1.js` | Runnable PLAN gate 1: movement, rotation, jump, inventory interaction, two-tick stop release, delayed-planner cancellation. |
 | `agent/src/runner.js` | Autonomous loop: persistent goal, non-blocking deliberation, typed-failure memory, loop guards. |
 | `agent/src/recovery.js` | Death policy: respawn or wait, rate limited, verified against the client. Never resumes the interrupted goal. |
-| `client-mod/src/client/java/dev/windove/bridge/Observations.java` | Read-only tick snapshot: entities, inventory, vitals, light. Writes no game state. |
+| `client-mod/src/client/java/dev/realmagent/bridge/Observations.java` | Read-only tick snapshot: entities, inventory, vitals, light. Writes no game state. |
 | `agent/test/bridge.test.js`, `supervisor.test.js`, `bench.test.js`, `observe.test.js`, `recovery.test.js` | Transport, invalid actions, cancellation, stale results, benchmark scoring, observation formatting and death recovery. |
 | `scripts/dependencies.py` | Check/fetch the pinned Baritone artifact. |
 | `scripts/client-options.py` | Set `pauseOnLostFocus:false` so alt-tabbing to the terminal does not cancel actions. Refuses while the client runs. |
-| `windove` | The single entry point. Subcommands for console, gates, build, test and setup. |
+| `realm-agent` | The single entry point. Subcommands for console, gates, build, test and setup. |
 | `scripts/build.sh`, `client.sh`, `agent.sh`, `test.sh` | Build, isolated client launch, private service and service tests. |
 | `evals/navigation.md` | Manual world evaluation procedure and evidence requirements. |
 | `README.md` | Test startup and current limitations. |
 
-Generated, not source: `.cache/gradle/`, `client-mod/libs/`, `client-mod/build/`, `client-mod/run/`, `runtime/`. No existing account configuration or normal Minecraft instance is overwritten. The isolated dev client uses its own game directory. The bridge generates a private token in that instance’s `config/windove-bridge-token.txt`.
+Generated, not source: `.cache/gradle/`, `client-mod/libs/`, `client-mod/build/`, `client-mod/run/`, `runtime/`. No existing account configuration or normal Minecraft instance is overwritten. The isolated dev client uses its own game directory. The bridge generates a private token in that instance’s `config/realm-agent-bridge-token.txt`.
 
 ## Models and downloads
 
@@ -84,7 +84,7 @@ Observation endpoints are read-only: they cannot start, steer or extend an actio
 - `POST /reflex`: arms or disarms the client-side safety tier, under the same session and epoch authority as any other control call. Once armed it runs on the client tick whether or not the agent process is responsive, which is the entire reason it lives in the mod.
 - `GET /history`: the last 60 compact observations, sampled every 10 ticks (about 30 seconds of world time), always on. Each carries position, health, food, light, hostile count, nearest hostile distance and slots used. This is the temporal perception every surveyed system feeds its planner as a frame sequence; twenty numbers per sample carry more of the same signal to a text model than twenty images, and cost nothing to produce. It has to already exist when something asks what just happened, so it is not request-gated.
 - `GET /observe`: nearest entities within 48 blocks (hostile flag, position, distance, health), inventory contents and selected slot, player vitals and rotation, light and sky light at the player, weather and game time. Sorted nearest-first before the 64-entity cap, so the cap can never hide something adjacent. Reports `observedAt`, `ageMs` and `fresh`.
-- `GET /frame`: PNG of the client's own view, downscaled to roughly 640 wide, with `X-Windove-Captured-At`, `X-Windove-Age-Ms`, `X-Windove-Fresh`, `X-Windove-Width/Height` and `X-Windove-Session`. Returns 503 until the render thread has produced one.
+- `GET /frame`: PNG of the client's own view, downscaled to roughly 640 wide, with `X-Realm-Agent-Captured-At`, `X-Realm-Agent-Age-Ms`, `X-Realm-Agent-Fresh`, `X-Realm-Agent-Width/Height` and `X-Realm-Agent-Session`. Returns 503 until the render thread has produced one.
 - `POST /respawn`: presses respawn, using the same session/epoch authority as `/navigate`. Refused with 409 unless the client is dead with the death screen showing, and always refused in a hardcore world. Death rotates the control epoch, so the request must carry an epoch observed after the death.
 - `GET /state`: latest tick observation, session, control epoch, phase, action ID, online/canAct flags, coordinates and health. Position is explicitly marked client-predicted.
 - `POST /navigate`: integer x,z, unique ID, session, epoch and observation timestamp. Revalidated on the client tick; returns accepted, not success.
@@ -120,7 +120,7 @@ Each new action needs a schema, cancellation behavior, permissions, verifiable s
 
 ## Authenticated Realm profile
 
-`runtime/realm-client/` is the isolated game directory for **Windove MVP 26.2** in the normal Minecraft Launcher. `scripts/install-launcher.py` installs the official Fabric version manifest, copies the three required mods and adds a backed-up launcher profile. Authentication remains with the normal launcher; no account token is copied into agent configuration. `./windove` defaults to this instance's bridge token; `--dev` explicitly selects the unauthenticated development instance.
+`runtime/realm-client/` is the isolated game directory for **Realm Agent 26.2** in the normal Minecraft Launcher. `scripts/install-launcher.py` installs the official Fabric version manifest, copies the three required mods and adds a backed-up launcher profile. Authentication remains with the normal launcher; no account token is copied into agent configuration. `./realm-agent` defaults to this instance's bridge token; `--dev` explicitly selects the unauthenticated development instance.
 
 The Gradle development client is for local testing only and cannot authenticate to Realms. The production-style profile corrects this difference. Authenticated Realm login is not claimed as tested merely because this installation was created.
 

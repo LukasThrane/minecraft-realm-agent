@@ -1,9 +1,9 @@
 plugins { id 'net.fabricmc.fabric-loom' version '1.17.20' }
 version = '0.1.0'
-group = 'dev.windove'
+group = 'dev.realmagent'
 loom {
     splitEnvironmentSourceSets()
-    mods { windove_bridge { sourceSet sourceSets.main; sourceSet sourceSets.client } }
+    mods { realm_agent_bridge { sourceSet sourceSets.main; sourceSet sourceSets.client } }
 }
 dependencies {
     minecraft 'com.mojang:minecraft:26.2'
@@ -21,7 +21,7 @@ sourceSets.test.runtimeClasspath += sourceSets.client.output
 tasks.register('survivalTest', JavaExec) {
     dependsOn testClasses
     classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'dev.windove.bridge.SurvivalTest'
+    mainClass = 'dev.realmagent.bridge.SurvivalTest'
 }
 tasks.named('check') { dependsOn survivalTest }
 

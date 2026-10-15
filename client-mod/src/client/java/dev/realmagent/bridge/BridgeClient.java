@@ -1,4 +1,4 @@
-package dev.windove.bridge;
+package dev.realmagent.bridge;
 
 import baritone.api.BaritoneAPI;
 import baritone.api.pathing.goals.GoalXZ;
@@ -93,7 +93,7 @@ public final class BridgeClient implements ClientModInitializer {
 
     @Override public void onInitializeClient() {
         try {
-            Path tokenPath = Minecraft.getInstance().gameDirectory.toPath().resolve("config/windove-bridge-token.txt");
+            Path tokenPath = Minecraft.getInstance().gameDirectory.toPath().resolve("config/realm-agent-bridge-token.txt");
             Files.createDirectories(tokenPath.getParent());
             if (!Files.exists(tokenPath)) {
                 Files.writeString(tokenPath, UUID.randomUUID()+"-"+UUID.randomUUID(), StandardOpenOption.CREATE_NEW);
@@ -101,18 +101,18 @@ public final class BridgeClient implements ClientModInitializer {
             }
             token = Files.readString(tokenPath).trim();
             if (token.length()<32) throw new IllegalStateException("Bridge token must be at least 32 characters");
-            framePath = Minecraft.getInstance().gameDirectory.toPath().resolve("windove-frames/latest.png");
+            framePath = Minecraft.getInstance().gameDirectory.toPath().resolve("realm-agent-frames/latest.png");
             Files.createDirectories(framePath.getParent());
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 3009), 8);
             // Observation requests park briefly waiting for the next tick; keep control polling unblocked.
-            executor = Executors.newFixedThreadPool(4, r -> { Thread t=new Thread(r,"windove-http");t.setDaemon(true);return t; });
+            executor = Executors.newFixedThreadPool(4, r -> { Thread t=new Thread(r,"realm-agent-http");t.setDaemon(true);return t; });
             server.setExecutor(executor);
             server.createContext("/", this::handle);
             server.start();
             ClientTickEvents.START_CLIENT_TICK.register(this::tick);
             ClientLifecycleEvents.CLIENT_STOPPING.register(mc -> { halt("Client closing"); server.stop(0); executor.shutdownNow(); });
-            System.out.println("Windove bridge on 127.0.0.1:3009; token file: "+tokenPath+"; F8 stops control");
-        } catch (Exception e) { throw new IllegalStateException("Cannot initialize Windove bridge",e); }
+            System.out.println("Realm Agent bridge on 127.0.0.1:3009; token file: "+tokenPath+"; F8 stops control");
+        } catch (Exception e) { throw new IllegalStateException("Cannot initialize Realm Agent bridge",e); }
     }
     private void reply(HttpExchange ex, int status, String body) throws java.io.IOException {
         replyBytes(ex,status,"application/json",body.getBytes(StandardCharsets.UTF_8));
@@ -149,12 +149,12 @@ public final class BridgeClient implements ClientModInitializer {
             // A frame only exists once the render thread has produced one; say so rather than stalling.
             reply(ex,503,gson.toJson(Map.of("error","No frame captured yet","frameError",frameError)));return;
         }
-        ex.getResponseHeaders().set("X-Windove-Captured-At",String.valueOf(frameAt));
-        ex.getResponseHeaders().set("X-Windove-Age-Ms",String.valueOf(System.currentTimeMillis()-frameAt));
-        ex.getResponseHeaders().set("X-Windove-Fresh",String.valueOf(fresh));
-        ex.getResponseHeaders().set("X-Windove-Width",String.valueOf(frameWidth));
-        ex.getResponseHeaders().set("X-Windove-Height",String.valueOf(frameHeight));
-        ex.getResponseHeaders().set("X-Windove-Session",session);
+        ex.getResponseHeaders().set("X-Realm-Agent-Captured-At",String.valueOf(frameAt));
+        ex.getResponseHeaders().set("X-Realm-Agent-Age-Ms",String.valueOf(System.currentTimeMillis()-frameAt));
+        ex.getResponseHeaders().set("X-Realm-Agent-Fresh",String.valueOf(fresh));
+        ex.getResponseHeaders().set("X-Realm-Agent-Width",String.valueOf(frameWidth));
+        ex.getResponseHeaders().set("X-Realm-Agent-Height",String.valueOf(frameHeight));
+        ex.getResponseHeaders().set("X-Realm-Agent-Session",session);
         replyBytes(ex,200,"image/png",bytes);
     }
     private void handle(HttpExchange ex) throws java.io.IOException {
@@ -296,7 +296,7 @@ public final class BridgeClient implements ClientModInitializer {
         // and keep the body under control, rather than blocking every skill on a stack trace.
         try { threat=survival.update(mc); }
         catch(LinkageError|RuntimeException e) {
-            if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Survival assessment failed; falling back to maintenance reflexes",e);
+            if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("realm-agent-bridge").error("Survival assessment failed; falling back to maintenance reflexes",e);
             survivalError=e.toString();survival.reset();threat=Reflexes.NONE;
         }
         String wanted;
@@ -340,7 +340,7 @@ public final class BridgeClient implements ClientModInitializer {
         } else {
             try { survival.drive(mc); }
             catch(LinkageError|RuntimeException e) {
-                if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Survival actuation failed; releasing movement",e);
+                if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("realm-agent-bridge").error("Survival actuation failed; releasing movement",e);
                 survivalError=e.toString();releaseHeldKeys();endReflex("Survival actuation failed: "+e.getClass().getSimpleName());
             }
         }
@@ -664,7 +664,7 @@ public final class BridgeClient implements ClientModInitializer {
             // The class name alone is not a diagnosis. A controller fault disarms safety and stops
             // the body, so it is rare by construction and worth a full stack trace in the client
             // log; the operator's terminal only ever sees the summary.
-            org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Controller error on client tick {}",ticks,e);
+            org.slf4j.LoggerFactory.getLogger("realm-agent-bridge").error("Controller error on client tick {}",ticks,e);
             lastControllerError=e.toString();
             disarm("Controller error");halt("Controller error: "+e.getClass().getSimpleName());phase="blocked";
             snapshot=gson.toJson(Map.of("online",false,"phase",phase,"reason",e.toString(),"observedAt",System.currentTimeMillis()));
