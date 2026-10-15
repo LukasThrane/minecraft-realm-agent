@@ -12,6 +12,16 @@ export const FAILURES = ['no_progress','deadline','precondition','interrupted','
  * world state: replanning from a fresh observation lands on the same next step by construction.
  */
 export const RESUMABLE = new Set(['safety_preempted']);
+/**
+ * Failures that say nothing about the goal. Dying mid-chain cancelled the job three times and the
+ * attempt record then refused the goal outright -- "obtain:iron_ingot already failed 3 times" --
+ * leaving a run that could no longer pursue the only thing it was there for.
+ */
+// `expedition_limit` belongs here for the same reason: it says the body was hungry, hurt or full
+// at that moment, not that the step was wrong. Counting it banned gathering cobblestone for the
+// rest of a run, and every plan the agent could still write went through that step.
+export const BLAMELESS = new Set(['control_changed', 'takeover', 'interrupted', 'safety_preempted', 'expedition_limit']);
+export function blameless(failure) { return BLAMELESS.has(failure); }
 export function disposition(failure) { return RESUMABLE.has(failure) ? 'resume' : 'abandon'; }
 /**
  * The propositions a decision depended on. Bounds mirror Actions.java; the client re-checks them
@@ -48,7 +58,7 @@ export function scopeFor(action) { return ['break','place','skill'].includes(act
  * bounded by Baritone's search and the walk home rather than by anything we can predict, so it
  * gets the widest window; a menu transaction that has not finished in a minute is stuck.
  */
-export const SKILL_DEADLINES = { gather: 240_000, smelt: 180_000, craft: 60_000, deploy_station: 60_000 };
+export const SKILL_DEADLINES = { gather: 240_000, smelt: 180_000, craft: 60_000, deploy_station: 60_000, eat: 30000, equip: 10000, shaft: 600000 };
 /** Deadlines are part of the action, not a caller convention: nothing runs unbounded. */
 export function deadlineFor(action) {
   switch (action.type) {
@@ -121,7 +131,7 @@ export function directCommand(text, site) {
   return match ? validateAction({ type: 'navigate', x: Number(match[1]), z: Number(match[2]) }) : null;
 }
 
-export const SKILL_KINDS = ['gather','craft','deploy_station','smelt'];
+export const SKILL_KINDS = ['gather','craft','deploy_station','smelt','eat','equip','shaft'];
 const ID = /^minecraft:[a-z0-9_]+$/;
 
 /**
@@ -136,12 +146,33 @@ export function validateSkill(action) {
   if (typeof item !== 'string' || !ID.test(item)) throw Error('skill item must be a minecraft: id');
   if (!Number.isInteger(count) || count < 1 || count > 256) throw Error('skill count must be an integer 1..256');
   const checked = { type: 'skill', kind, item, count };
-  if (kind === 'smelt' && (item !== 'minecraft:iron_ingot' || count > 8)) throw Error('Smelting supports 1..8 iron ingots');
+  if (kind === 'eat') {
+    if (!Number.isInteger(action.targetFood) || action.targetFood < 1 || action.targetFood > 20) throw Error('targetFood must be 1..20');
+    checked.targetFood = action.targetFood;
+  }
+  if (kind === 'shaft') {
+    if (!['north','south','east','west'].includes(action.direction) || count > 32) throw Error('Shaft needs cardinal direction and 1..32 steps');
+    if (!Number.isInteger(action.torchEvery) || action.torchEvery < 1 || action.torchEvery > 8) throw Error('torchEvery must be 1..8');
+    Object.assign(checked,{direction:action.direction,torchEvery:action.torchEvery});
+  }
+  for (const key of ['minFood','minHealth','minDurability']) if (action[key] !== undefined) {
+    if (!Number.isFinite(action[key]) || action[key]<0 || action[key]>100) throw Error(`Invalid ${key}`);
+    checked[key]=action[key];
+  }
+  if (action.reserves !== undefined) {
+    if (!action.reserves || Array.isArray(action.reserves) || Object.entries(action.reserves).some(([id,n]) => !ID.test(id) || !Number.isInteger(n) || n<0)) throw Error('Invalid material reserves');
+    checked.reserves={...action.reserves};
+  }
+  if (kind === 'smelt'  && (item !== 'minecraft:iron_ingot' || count > 8)) throw Error('Smelting supports 1..8 iron ingots');
   if (kind === 'gather') {
     const { blocks, tool } = action;
     if (!Array.isArray(blocks) || !blocks.length || blocks.length > 32) throw Error('gather needs 1..32 target blocks');
     if (!blocks.every(block => typeof block === 'string' && ID.test(block))) throw Error('gather blocks must be block ids');
     checked.blocks = [...blocks];
+    if (action.returnToOrigin !== undefined) {
+      if (typeof action.returnToOrigin !== 'boolean') throw Error('returnToOrigin must be boolean');
+      checked.returnToOrigin=action.returnToOrigin;
+    }
     if (tool !== null && tool !== undefined) {
       if (typeof tool !== 'string' || !ID.test(tool)) throw Error('gather tool must be an item id');
       checked.tool = tool;

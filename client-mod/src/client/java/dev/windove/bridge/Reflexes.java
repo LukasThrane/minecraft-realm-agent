@@ -2,8 +2,6 @@ package dev.windove.bridge;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.component.DataComponents;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 
 /**
@@ -15,93 +13,85 @@ import net.minecraft.world.item.ItemStack;
  * preempts a running action and the action ends as cancelled with `safety_preempted`, so the
  * agent learns why its goal stopped rather than seeing it vanish.
  *
- * Deliberately conservative. Retreat backs away from the nearest hostile and is capped, because a
- * client-side reflex cannot see a cliff or lava it might be reversing into; it buys seconds for a
- * slower layer to decide, and is not a survival guarantee.
+ * Threat assessment and movement live in Survival; this class owns physiological maintenance.
  */
 final class Reflexes {
-    static final String NONE = "", RETREAT = "retreat", EAT = "eat", SURFACE = "surface";
+    static final String NONE = "", RETREAT = "retreat", EAT = "eat", SURFACE = "surface", ESCAPE = "escape";
     /** Vanilla air is 300 ticks. Act well before it runs out, and keep going until it is refilled. */
     static final int AIR_LOW = 160, AIR_RECOVERED = 280;
-    /** Hysteresis: a reflex must clear by a wider margin than it triggered, or it chatters. */
-    static final double TRIGGER_RADIUS = 5.0, CLEAR_RADIUS = 8.0;
-    static final int EAT_BELOW_FOOD = 6, RETREAT_MAX_TICKS = 60, EAT_MAX_TICKS = 60, SURFACE_MAX_TICKS = 200;
+    static final int EAT_BELOW_FOOD = 6, EAT_MAX_TICKS = 60;
 
     private Reflexes() {}
 
-    static Entity nearestHostile(Minecraft mc, double radius) {
-        if (mc.player == null || mc.level == null) return null;
-        Entity nearest = null;
-        double best = radius;
-        for (Entity entity : mc.level.entitiesForRendering()) {
-            if (entity == mc.player || !entity.isAlive() || !(entity instanceof Enemy)) continue;
-            double distance = entity.distanceTo(mc.player);
-            if (distance <= best) { best = distance; nearest = entity; }
-        }
-        return nearest;
-    }
     /** Hotbar slot holding something edible, or -1. Hotbar only: no container or inventory access. */
-    static int foodSlot(Minecraft mc) {
+    /**
+     * Food that costs more than it gives: rotten flesh and its friends trade hunger for poison or
+     * nausea. Worth eating only when the alternative is starving, never as routine maintenance.
+     */
+    private static final java.util.Set<String> LAST_RESORT_FOOD = java.util.Set.of(
+        "rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken", "suspicious_stew");
+    private static boolean grim(ItemStack stack) {
+        return LAST_RESORT_FOOD.contains(net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath());
+    }
+    static int foodSlot(Minecraft mc) { return foodSlot(mc, mc != null && mc.player != null && mc.player.getFoodData().getFoodLevel() <= 2); }
+    static int foodSlot(Minecraft mc, boolean desperate) {
         if (mc.player == null) return -1;
         var bag = mc.player.getInventory();
-        for (int slot = 0; slot < 9; slot++) {
+        int fallback = -1;
+        for (int slot = 0; slot < 36; slot++) {
             ItemStack stack = bag.getItem(slot);
-            if (!stack.isEmpty() && stack.has(DataComponents.FOOD)) return slot;
+            if (stack.isEmpty() || !stack.has(DataComponents.FOOD)) continue;
+            if (!grim(stack)) return slot;
+            if (fallback < 0) fallback = slot;
         }
-        return -1;
+        return desperate ? fallback : -1;
+    }
+    /** Blocks that hurt on contact rather than at a distance. Lava is the one that kills fast. */
+    private static final java.util.Set<String> CONTACT = java.util.Set.of(
+        "lava", "fire", "soul_fire", "magma_block", "campfire", "soul_campfire");
+    /**
+     * Are we standing in something that is burning us right now?
+     *
+     * Not merely on fire: a character alight on grass is losing health the eating reflex can
+     * cover, while a character in lava has about four seconds. Only contact with the source is
+     * worth taking the body for.
+     */
+    static boolean burning(Minecraft mc) {
+        if (mc.player == null || mc.level == null) return false;
+        if (mc.player.isInLava()) return true;
+        var box = mc.player.getBoundingBox();
+        for (net.minecraft.core.BlockPos pos : net.minecraft.core.BlockPos.betweenClosed(
+                net.minecraft.core.BlockPos.containing(box.minX + 0.05, box.minY - 0.08, box.minZ + 0.05),
+                net.minecraft.core.BlockPos.containing(box.maxX - 0.05, box.maxY, box.maxZ - 0.05))) {
+            if (!mc.level.hasChunkAt(pos)) continue;
+            if (mc.level.getFluidState(pos).is(net.minecraft.tags.FluidTags.LAVA)) return true;
+            if (CONTACT.contains(net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                    .getKey(mc.level.getBlockState(pos).getBlock()).getPath())) return true;
+        }
+        return false;
     }
     static boolean drowning(Minecraft mc) {
         return mc.player != null && mc.player.isUnderWater() && mc.player.getAirSupply() < AIR_LOW;
     }
-    /**
-     * Which reflex the current world state calls for, ignoring whatever is already running.
-     * Drowning outranks a mob: water kills on its own schedule whether or not anything is chasing,
-     * and a retreat that runs into a lake was previously how this agent died.
-     */
-    static String wanted(Minecraft mc) {
-        if (mc.player == null || mc.level == null) return NONE;
+    /** Vanilla regenerates health only while food is nearly full, so being hurt is a reason to eat. */
+    static final int EAT_TO_HEAL_FOOD = 20;
+    static boolean hurt(Minecraft mc) {
+        return mc.player.getHealth() < mc.player.getMaxHealth();
+    }
+    static String maintenance(Minecraft mc) {
         if (drowning(mc)) return SURFACE;
-        if (nearestHostile(mc, TRIGGER_RADIUS) != null) return RETREAT;
         if (mc.player.getFoodData().getFoodLevel() <= EAT_BELOW_FOOD && foodSlot(mc) >= 0) return EAT;
+        // Being hurt with food in the bag and a half-empty bar is a reason to eat now, not after
+        // the bar runs down: regeneration is what turns a bad fight into a survivable one.
+        if (hurt(mc) && mc.player.getFoodData().getFoodLevel() < EAT_TO_HEAL_FOOD && foodSlot(mc) >= 0) return EAT;
         return NONE;
     }
-    /** Whether a running reflex should keep going. Wider than the trigger, so it does not chatter. */
     static boolean stillNeeded(Minecraft mc, String active) {
         if (mc.player == null) return false;
         return switch (active) {
             case SURFACE -> mc.player.isInWater() && mc.player.getAirSupply() < AIR_RECOVERED;
-            case RETREAT -> nearestHostile(mc, CLEAR_RADIUS) != null;
-            case EAT -> mc.player.getFoodData().getFoodLevel() <= EAT_BELOW_FOOD + 4 && foodSlot(mc) >= 0;
+            case EAT -> mc.player.getFoodData().getFoodLevel() < (hurt(mc) ? EAT_TO_HEAL_FOOD : EAT_BELOW_FOOD + 4) && foodSlot(mc) >= 0;
             default -> false;
         };
-    }
-    /** Yaw that points directly away from a threat. */
-    static float awayFrom(Minecraft mc, Entity threat) {
-        double dx = mc.player.getX() - threat.getX(), dz = mc.player.getZ() - threat.getZ();
-        return (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-    }
-
-    static Float escapeYaw(Minecraft mc, Entity threat) {
-        float away=awayFrom(mc,threat);
-        for(int offset:new int[]{0,45,-45,90,-90,135,-135,180}) {
-            float yaw=away+offset;
-            double radians=Math.toRadians(yaw);
-            double dx=-Math.sin(radians), dz=Math.cos(radians);
-            var next=mc.player.getBoundingBox().move(dx,0,dz);
-            boolean clear=mc.level.noCollision(mc.player,next);
-            boolean step=mc.player.onGround() && mc.level.noCollision(mc.player,next.move(0,1,0));
-            if(!clear && !step) continue;
-            var feet=net.minecraft.core.BlockPos.containing(mc.player.getX()+dx,mc.player.getY(),mc.player.getZ()+dz);
-            boolean supported=false, hazardous=false;
-            for(int depth=0;depth<=3;depth++) {
-                var at=feet.below(depth);
-                var block=mc.level.getBlockState(at);
-                if(!mc.level.getFluidState(at).isEmpty()) { hazardous=true;break; }
-                if(!block.getCollisionShape(mc.level,at).isEmpty()) supported=true;
-            }
-            if(!mc.player.isInWater() && (!supported || hazardous)) continue;
-            return yaw;
-        }
-        return null;
     }
 }

@@ -7,6 +7,7 @@
 export const STALE_MS = 1000;
 
 export function threats(observation, radius = 16) {
+  if(observation.survival?.assessed !== false && observation.survival) return (observation.survival.threats ?? []).map(e=>e.entity).filter(e=>e.distance<=radius);
   return (observation.entities ?? []).filter(e => e.hostile && e.distance <= radius).sort((a, b) => a.distance - b.distance);
 }
 export function isStale(observation, now = Date.now()) {
@@ -23,12 +24,13 @@ export function describe(observation, { radius = 32, maxEntities = 8 } = {}) {
   lines.push(`at ${round(self.x)},${round(self.y)},${round(self.z)} facing ${round(self.yaw)} | health ${round(self.health, 1)}/${round(self.maxHealth)} food ${self.food} | light ${observation.light} (sky ${observation.skyLight})`
     + [self.inWater && 'in water', self.onFire && 'ON FIRE', !self.onGround && 'airborne', observation.thundering ? 'thundering' : observation.raining && 'raining'].filter(Boolean).map(s => ` | ${s}`).join(''));
   const inRange = (observation.entities ?? []).filter(e => e.distance <= radius);
-  const hostile = inRange.filter(e => e.hostile);
-  const rest = inRange.filter(e => !e.hostile);
+  const hostile = observation.survival?.assessed !== false && observation.survival ? threats(observation,radius) : inRange.filter(e => e.hostile);
+  const rest = observation.survival?.assessed !== false && observation.survival ? inRange.filter(e=>!hostile.some(t=>t.id===e.uuid)) : inRange.filter(e => !e.hostile);
   lines.push(hostile.length
     ? `hostiles (${hostile.length}): ` + hostile.slice(0, maxEntities).map(e => `${near(e)} ${round(e.health, 1)}/${round(e.maxHealth)}hp`).join(', ')
     : `hostiles: none within ${radius}m`);
   if (rest.length) lines.push(`other (${rest.length}): ` + rest.slice(0, maxEntities).map(e => near(e)).join(', '));
+  if(observation.survival?.assessed !== false && observation.survival) lines.push(`survival: ${observation.survival.mode || "continue work"} — ${observation.survival.reason}`);
   const items = observation.inventory?.items ?? [];
   const held = items.find(i => i.slot === observation.inventory?.selectedSlot);
   lines.push(`inventory ${items.length}/${observation.inventory?.size ?? '?'} slots used, holding ${held ? `${held.count}x ${short(held.item)}` : 'nothing'}`

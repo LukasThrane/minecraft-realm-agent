@@ -27,7 +27,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
 /**
- * Tick-owned control, loopback transport. No mining, placement or combat API in this MVP.
+ * Tick-owned control and loopback transport, including skills and bounded defensive survival.
  *
  * Observation (protocol 2) is strictly read-only and lives beside control, not inside it:
  * /observe and /frame cannot start, steer or extend an action. Both are sampled on the tick
@@ -75,6 +75,13 @@ public final class BridgeClient implements ClientModInitializer {
     private volatile String activeReflex=Reflexes.NONE;
     private volatile int reflexCount;
     private int reflexTicks;
+    private final Survival survival=new Survival();
+    private final Loadout loadout=new Loadout();
+    private final ArrayDeque<JsonObject> survivalEvents=new ArrayDeque<>();
+    private int reflexSlot=-1;
+    private String survivalLogKey="";
+    private volatile String lastControllerError="", survivalError="";
+    private volatile boolean stopKeepsSafety;
     private BlockPos targetPos; private Direction targetFace;
     private String targetBlockBefore="", targetBlockAfter="";
     private volatile boolean singleplayer;
@@ -173,6 +180,11 @@ public final class BridgeClient implements ClientModInitializer {
             byte[] raw=ex.getRequestBody().readNBytes(4097);
             if(raw.length>4096) {reply(ex,413,"{}");return;}
             if(path.equals("/stop")) {
+                // `keepSafety` marks a stop the agent issued to cancel its own job. An operator
+                // stop still switches the safety tier off; a retarget must not.
+                stopKeepsSafety=raw.length>0
+                    && JsonParser.parseString(new String(raw,StandardCharsets.UTF_8)).getAsJsonObject()
+                        .has("keepSafety");
                 // Record the tick we were heard on; the tick that releases inputs reports the gap.
                 stopReceivedTick=ticks;stopReceivedAt=System.currentTimeMillis();
                 epoch.incrementAndGet(); pending.set(null);stopRequested.set(true);leaseUntil=0;
@@ -243,11 +255,15 @@ public final class BridgeClient implements ClientModInitializer {
     }
     private void disarm(String why) {
         if(!reflexArmed && activeReflex.equals(Reflexes.NONE)) return;
-        reflexArmed=false;endReflex(why);
+        reflexArmed=false;endReflex(why);survival.reset();
     }
     private void endReflex(String why) {
         if(activeReflex.equals(Reflexes.NONE)) return;
+        logSurvival("end",why);
         activeReflex=Reflexes.NONE;reflexTicks=0;releaseHeldKeys();
+        if(client!=null && client.player!=null && reflexSlot>=0) client.player.getInventory().setSelectedSlot(reflexSlot);
+        reflexSlot=-1;
+        if(phase.equals("reflex")) phase="idle";
         if(client!=null&&client.options!=null) client.options.keyUse.setDown(false);
         reason=why;
     }
@@ -255,45 +271,78 @@ public final class BridgeClient implements ClientModInitializer {
      * The safety tier. Runs before any task work, so it can preempt it, and runs whether or not
      * the agent process is responsive — which is the point: deliberation takes seconds.
      */
-    private void runReflexes(Minecraft mc, boolean f8) {
-        if(f8 || !reflexArmed || mc.player==null || dead || mc.gui.screen()!=null || mc.isPaused()) { endReflex("Safety tier idle"); return; }
-        if(Reflexes.drowning(mc) && !activeReflex.equals(Reflexes.SURFACE)) endReflex("Surfacing takes priority");
-        if(!activeReflex.equals(Reflexes.NONE)) {
-            int cap=switch(activeReflex){case Reflexes.RETREAT->Reflexes.RETREAT_MAX_TICKS;case Reflexes.SURFACE->Reflexes.SURFACE_MAX_TICKS;default->Reflexes.EAT_MAX_TICKS;};
-            if(++reflexTicks>cap
-               || !Reflexes.stillNeeded(mc,activeReflex)) { endReflex("Safety reflex complete: "+activeReflex); return; }
-            driveReflex(mc);
-            return;
-        }
-        String wanted=Reflexes.wanted(mc);
-        if(wanted.equals(Reflexes.NONE)) return;
-        // Preempting is reported, not silent: the agent must learn why its goal stopped.
-        if(!activeReflex.equals(wanted) && !"".equals(activeType)) finish("cancelled",Actions.FAIL_SAFETY,"Preempted by safety reflex: "+wanted,false);
-        activeReflex=wanted;reflexTicks=0;reflexCount++;
-        phase="reflex";reason="Safety reflex: "+wanted;
-        if(wanted.equals(Reflexes.EAT)) {int slot=Reflexes.foodSlot(mc); if(slot>=0) mc.player.getInventory().setSelectedSlot(slot);}
-        driveReflex(mc);
+    private void logSurvival(String event,String why) {
+        JsonObject record=survival.evidence().deepCopy();
+        record.addProperty("event",event);record.addProperty("response",activeReflex);
+        record.addProperty("why",why);record.addProperty("clientTick",ticks);
+        survivalEvents.addLast(record);while(survivalEvents.size()>32) survivalEvents.removeFirst();
+        // Published as a bounded event ring; Node journals it asynchronously, never tick-thread disk I/O.
     }
-    private void driveReflex(Minecraft mc) {
-        boolean inWater=mc.player.isInWater();
-        if(activeReflex.equals(Reflexes.SURFACE)) {
-            // Holding jump is how a player swims up. Nothing else matters while the air bar drains.
-            mc.options.keyJump.setDown(true);
-            return;
+    private void runReflexes(Minecraft mc, boolean f8) {
+        if(f8 || !reflexArmed || mc.player==null || dead || (mc.gui.screen()!=null && !(skill!=null && skill.ownsMenu(mc))) || mc.isPaused()) {
+            if(!activeReflex.isEmpty() && (dead || mc.gui.screen()!=null || mc.isPaused())) {
+                // Cancel the response and the action it preempted, but stay armed. Disarming here
+                // meant one death or one opened menu silently switched safety off for the rest of
+                // the run, after which a zombie could stand and hit an idle player unopposed.
+                // Only the operator (F8, an explicit disarm) or a controller fault turns it off.
+                finish("cancelled",Actions.FAIL_TAKEOVER,"Survival cancelled by death/menu/pause",true);
+                endReflex("Survival cancelled by death/menu/pause; safety stays armed");
+            } else endReflex("Safety tier idle / operator or world unavailable");
+            survival.reset();return;
         }
-        if(activeReflex.equals(Reflexes.RETREAT)) {
-            var threat=Reflexes.nearestHostile(mc,Reflexes.CLEAR_RADIUS);
-            Float escapeYaw=threat==null?null:Reflexes.escapeYaw(mc,threat);
-            if(escapeYaw!=null) mc.player.setYRot(escapeYaw);
-            mc.options.keyUp.setDown(escapeYaw!=null);
-            // Running blind into terrain was killing it: a one-block step or a fence stopped the
-            // retreat dead, and water drowned it. Jump when something is in the way, and keep
-            // jumping while swimming so it stays at the surface instead of sinking.
-            mc.options.keyJump.setDown(inWater || (mc.player.horizontalCollision && mc.player.onGround()));
-            // Sprinting does not work in water and needs food above 6.
-            mc.options.keySprint.setDown(escapeYaw!=null && !inWater && mc.player.getFoodData().getFoodLevel()>6);
-        } else if(activeReflex.equals(Reflexes.EAT)) {
-            mc.options.keyUse.setDown(true);
+        String threat;
+        // A fault in threat assessment must not take the bridge down with it. Survival is the
+        // tier that is allowed to fail safe: log it once, drop back to physiological maintenance
+        // and keep the body under control, rather than blocking every skill on a stack trace.
+        try { threat=survival.update(mc); }
+        catch(LinkageError|RuntimeException e) {
+            if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Survival assessment failed; falling back to maintenance reflexes",e);
+            survivalError=e.toString();survival.reset();threat=Reflexes.NONE;
+        }
+        String wanted;
+        // Above everything, including drowning: lava takes about four seconds, and a threat we
+        // are retreating from is less urgent than the floor we are standing in.
+        // Contact, or one step from it. The task layer's veto stops the body without moving it,
+        // which parked a character beside lava for the twenty seconds a review took and killed it.
+        // Heading into a hazard is the safety tier's business: it takes the body, walks it clear,
+        // and the task suspends resumably instead of dying where it stands.
+        if(Reflexes.burning(mc) || Skills.approachingHazard(mc)) wanted=Reflexes.ESCAPE;
+        else if(Reflexes.drowning(mc) || activeReflex.equals(Reflexes.SURFACE) && Reflexes.stillNeeded(mc,activeReflex)) wanted=Reflexes.SURFACE;
+        else if(!threat.isEmpty()) wanted=threat;
+        else if(activeReflex.equals(Reflexes.EAT) && reflexTicks<Reflexes.EAT_MAX_TICKS && Reflexes.stillNeeded(mc,activeReflex)) wanted=Reflexes.EAT;
+        else wanted=Reflexes.maintenance(mc);
+        if(wanted.isEmpty()) {endReflex("Safety cleared: "+survival.reason());return;}
+        String responseWhy=wanted.equals(Reflexes.EAT)?"food below recovery threshold; edible hotbar slot "+Reflexes.foodSlot(mc):
+            wanted.equals(Reflexes.SURFACE)?"underwater air recovery; air="+mc.player.getAirSupply():
+            wanted.equals(Reflexes.ESCAPE)?(Reflexes.burning(mc)?"standing in a contact hazard; leaving it":"movement leads into a contact hazard; backing off"):survival.reason();
+        boolean start=activeReflex.isEmpty();
+        if(start) {
+            if(!activeType.isEmpty()) finish("cancelled",Actions.FAIL_SAFETY,"Preempted by safety reflex: "+wanted+"; "+responseWhy,false);
+            // Safety is the only movement owner even between task actions.
+            try {var b=BaritoneAPI.getProvider().getPrimaryBaritone();b.getPathingBehavior().forceCancel();b.getInputOverrideHandler().clearAllKeys();} catch(LinkageError|RuntimeException ignored) {}
+            reflexSlot=mc.player.getInventory().getSelectedSlot();reflexTicks=0;reflexCount++;
+        }
+        boolean changed=!activeReflex.equals(wanted);
+        activeReflex=wanted;reflexTicks++;phase="reflex";
+        reason="Safety reflex: "+wanted+"; "+responseWhy;
+        String logKey=wanted+":"+(wanted.equals(Reflexes.SURFACE)?"air recovery":responseWhy);
+        if(start || changed || !logKey.equals(survivalLogKey) || reflexTicks%20==0) {
+            logSurvival(start?"start":changed?"transition":"persist",reason);survivalLogKey=logKey;
+        }
+        releaseHeldKeys();mc.options.keyUse.setDown(false);
+        if(wanted.equals(Reflexes.ESCAPE)) survival.escapeHazard(mc);
+        else if(wanted.equals(Reflexes.SURFACE)) mc.options.keyJump.setDown(true);
+        else if(wanted.equals(Reflexes.EAT)) {
+            int slot=Reflexes.foodSlot(mc);
+            if(slot>=9 && mc.player.containerMenu==mc.player.inventoryMenu && mc.player.containerMenu.getCarried().isEmpty()) {
+                mc.gameMode.handleContainerInput(mc.player.inventoryMenu.containerId,slot,mc.player.getInventory().getSelectedSlot(),net.minecraft.world.inventory.ContainerInput.SWAP,mc.player);
+            } else if(slot>=0 && slot<9) {mc.player.getInventory().setSelectedSlot(slot);mc.options.keyUse.setDown(true);}
+        } else {
+            try { survival.drive(mc); }
+            catch(LinkageError|RuntimeException e) {
+                if(survivalError.isEmpty()) org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Survival actuation failed; releasing movement",e);
+                survivalError=e.toString();releaseHeldKeys();endReflex("Survival actuation failed: "+e.getClass().getSimpleName());
+            }
         }
     }
     private static String blockAt(Minecraft mc, BlockPos pos) {
@@ -419,13 +468,20 @@ public final class BridgeClient implements ClientModInitializer {
             wasDead=dead;
             if(playerIdentity!=mc.player) {
                 // Respawning replaces the player entity, so distinguish it from a world change.
+                endReflex("World/session changed");survival.reset();survivalEvents.clear();
+                Skills.clearPending();loadout.reset();
                 halt(respawning?"Respawned":"World/session changed");
                 if(respawning) {lastRespawnAt=now;respawning=false;}
                 playerIdentity=mc.player;session=UUID.randomUUID().toString();
             }
             if(stopRequested.getAndSet(false)) {
                 finish("cancelled",Actions.FAIL_TAKEOVER,"Stop requested",true);
-                disarm("Stop requested");
+                // Cancelling work is not the same as switching safety off. The agent stops its own
+                // job whenever it retargets, and disarming there left the body unprotected until
+                // something noticed and re-armed it.
+                if(stopKeepsSafety) endReflex("Stop requested; safety stays armed");
+                else disarm("Stop requested");
+                stopKeepsSafety=false;
                 long received=stopReceivedTick;
                 if(received>=0) {
                     stopReleaseTicks=ticks-received;stopReleaseMs=System.currentTimeMillis()-stopReceivedAt;stopReleaseAt=System.currentTimeMillis();
@@ -435,6 +491,13 @@ public final class BridgeClient implements ClientModInitializer {
             if(!activeType.isEmpty() && !activeType.equals("respawn") && (mc.player==null||dead||(mc.gui.screen()!=null && !(skill!=null && skill.ownsMenu(mc)))||mc.isPaused())) halt(dead?"Player died":"World unavailable, menu opened or paused");
             if(!activeType.isEmpty() && now>leaseUntil) halt("Agent heartbeat lost");
             runReflexes(mc,f8);
+            // Keep the kit usable between actions. Armour is no use in a bag and the safety tier
+            // only sees the hotbar, so this runs on the tick rather than costing a model decision.
+            if(!f8 && reflexArmed && activeReflex.equals(Reflexes.NONE) && activeType.isEmpty()
+                    && !dead && mc.gui.screen()==null && !mc.isPaused() && mc.gameMode!=null) {
+                String adjusted=loadout.tick(mc);
+                if(adjusted!=null) logSurvival("loadout",adjusted);
+            }
             // Hold a queued command while the safety tier owns the body; start it when it lets go.
             JsonObject cmd=activeReflex.equals(Reflexes.NONE)?pending.getAndSet(null):null;
             boolean owned=cmd!=null && !f8 && mc.player!=null && cmd.get("epoch").getAsLong()==epoch.get() && cmd.get("session").getAsString().equals(session);
@@ -554,11 +617,21 @@ public final class BridgeClient implements ClientModInitializer {
             JsonObject state=new JsonObject();state.addProperty("protocol",3);state.addProperty("observedAt",now);state.addProperty("epoch",epoch.get());state.addProperty("session",session);
             state.addProperty("online",mc.player!=null);state.addProperty("phase",phase);state.addProperty("reason",reason);state.addProperty("actionId",actionId);
             state.addProperty("canAct",mc.player!=null && mc.gui.screen()==null && !mc.isPaused() && mc.player.getHealth()>0);
-            state.addProperty("skillsVersion",2);
+            if(mc.level!=null) {
+                String world=mc.getCurrentServer()!=null?mc.getCurrentServer().ip:mc.getSingleplayerServer()!=null?mc.getSingleplayerServer().getWorldData().getLevelName():"unknown";
+                state.addProperty("worldKey",world+":"+mc.level.dimension());
+            }
+            if(skill!=null && mc.player!=null) state.add("skillProgress",skill.progress(mc));
+            state.addProperty("skillsVersion",4);state.addProperty("survivalVersion",1);
             state.addProperty("reflexArmed",reflexArmed);state.addProperty("reflex",activeReflex);state.addProperty("reflexCount",reflexCount);
             JsonObject queued=pending.get();
             state.addProperty("pendingActionId",queued==null?"":queued.get("actionId").getAsString());
-            state.addProperty("bridgeBuild","remembered-stations-1");
+            state.addProperty("bridgeBuild","survival-combat-10");
+            if(!lastControllerError.isEmpty()) state.addProperty("lastControllerError",lastControllerError);
+            if(!survivalError.isEmpty()) state.addProperty("survivalError",survivalError);
+            if(!loadout.last().isEmpty()) state.addProperty("loadout",loadout.last());
+            state.add("survival",survival.evidence());
+            state.add("survivalEvents",gson.toJsonTree(survivalEvents));
             state.addProperty("progress",progress.score());state.addProperty("stagnantTicks",progress.stagnantTicks());
             state.addProperty("failure",failure);
             state.addProperty("singleplayer",singleplayer);state.addProperty("buildScopeAvailable",singleplayer);
@@ -572,19 +645,29 @@ public final class BridgeClient implements ClientModInitializer {
             state.addProperty("canRespawn",dead && onDeathScreen && !hardcore);
             state.addProperty("positionSource","client-predicted");
             publishServerPosition(mc,state);state.addProperty("navigationAvailable",net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("baritone-fork"));
-            if(mc.player!=null) {state.addProperty("x",mc.player.getX());state.addProperty("y",mc.player.getY());state.addProperty("z",mc.player.getZ());state.addProperty("health",mc.player.getHealth());state.addProperty("food",mc.player.getFoodData().getFoodLevel());state.addProperty("dimension",mc.level.dimension().toString());}
+            if(mc.player!=null) {state.addProperty("x",mc.player.getX());state.addProperty("y",mc.player.getY());state.addProperty("z",mc.player.getZ());state.addProperty("health",mc.player.getHealth());state.addProperty("onFire",mc.player.isOnFire());state.addProperty("inLava",mc.player.isInLava());state.addProperty("food",mc.player.getFoodData().getFoodLevel());state.addProperty("saturation",mc.player.getFoodData().getSaturationLevel());state.addProperty("dimension",mc.level.dimension().toString());}
             if(navigating) {state.addProperty("targetX",targetX);state.addProperty("targetZ",targetZ);}
             snapshot=gson.toJson(state);
             if(ticks%HISTORY_EVERY_TICKS==0) {
-                history.addLast(Observations.digest(mc,ticks));
+                JsonObject digest=Observations.digest(mc,ticks);
+                if(survival.evidence().has("threats")) digest.addProperty("credibleThreats",survival.evidence().getAsJsonArray("threats").size());
+                history.addLast(digest);
                 while(history.size()>HISTORY_SAMPLES) history.removeFirst();
                 JsonArray samples=new JsonArray();for(JsonObject sample:history) samples.add(sample);
                 historyView=gson.toJson(samples);
             }
             // Sampling costs nothing while nobody is observing, and cannot influence control.
-            if(now<observedWantedUntil && now-observationAt>=100) {observation=gson.toJson(Observations.build(mc));observationAt=now;}
+            if(now<observedWantedUntil && now-observationAt>=100) {JsonObject observed=Observations.build(mc);observed.add("survival",survival.evidence());observation=gson.toJson(observed);observationAt=now;}
             if(captureInFlight.get() && now-captureStartedAt>3000) {captureInFlight.set(false);frameError="Capture readback timed out";}
             if(now<frameWantedUntil && now-frameAt>=200 && mc.level!=null) capture(mc,now);
-        } catch(LinkageError|RuntimeException e) {halt("Controller error: "+e.getClass().getSimpleName());phase="blocked";snapshot=gson.toJson(Map.of("online",false,"phase",phase,"reason",e.toString(),"observedAt",System.currentTimeMillis()));}
+        } catch(LinkageError|RuntimeException e) {
+            // The class name alone is not a diagnosis. A controller fault disarms safety and stops
+            // the body, so it is rare by construction and worth a full stack trace in the client
+            // log; the operator's terminal only ever sees the summary.
+            org.slf4j.LoggerFactory.getLogger("windove-bridge").error("Controller error on client tick {}",ticks,e);
+            lastControllerError=e.toString();
+            disarm("Controller error");halt("Controller error: "+e.getClass().getSimpleName());phase="blocked";
+            snapshot=gson.toJson(Map.of("online",false,"phase",phase,"reason",e.toString(),"observedAt",System.currentTimeMillis()));
+        }
     }
 }

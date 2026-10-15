@@ -1,8 +1,16 @@
 {
   "bridgeUrl": "http://127.0.0.1:3009",
-  "site": {"x": 200, "z": 200},
+  "site": {
+    "x": 200,
+    "z": 200
+  },
   "model": "qwen2.5:14b",
   "ollamaUrl": "http://127.0.0.1:11434",
   "modelEnabled": false,
-  "note": "Navigation only. No autonomous start, gathering, placement or combat."
+  "note": "Navigation only. No autonomous start, gathering, placement or combat. agent* keys bound deliberation cost: context window, tokens per routine and planning call, prompt size before trimming, and the ceiling on tool calls per review.",
+  "agentContextTokens": 8192,
+  "agentOutputTokens": 260,
+  "agentPlanTokens": 520,
+  "agentPromptChars": 9000,
+  "agentToolBudget": 6
 }

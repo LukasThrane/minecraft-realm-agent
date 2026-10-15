@@ -139,3 +139,13 @@ test('forbidden actions and invalid coordinates fail closed',()=>{
  for(const action of [{type:'mine'}, {type:'navigate',x:NaN,z:0},{type:'navigate',x:1.5,z:0},{type:'navigate',x:30_000_000,z:0}]) assert.throws(()=>validateAction(action));
  assert.equal(directCommand('mine diamonds',{x:200,z:200}),null);
 });
+
+test('survival event ring is journaled once across repeated polls and new sessions',async()=>{
+  const f=fixture();const events=[];f.agent.emit=e=>events.push(e);
+  f.state.survivalEvents=[{clientTick:10,event:'start',why:'entity-1 exposed'},{clientTick:30,event:'persist',why:'pursuit'}];
+  await f.agent.poll();await f.agent.poll();
+  assert.equal(events.filter(e=>e.kind==='survival').length,2);
+  f.state.session='world2';f.state.survivalEvents=[{clientTick:2,event:'end',why:'clear'}];
+  await f.agent.poll();
+  assert.equal(events.filter(e=>e.kind==='survival').length,3);
+});

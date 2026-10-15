@@ -14,3 +14,16 @@ dependencies {
 }
 tasks.withType(JavaCompile).configureEach { options.release = 25 }
 java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25 }
+
+// Dependency-free executable regressions exercise the same pure policy/search used by the client.
+sourceSets.test.compileClasspath += sourceSets.client.output
+sourceSets.test.runtimeClasspath += sourceSets.client.output
+tasks.register('survivalTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.windove.bridge.SurvivalTest'
+}
+tasks.named('check') { dependsOn survivalTest }
+
+// survivalTest above is an executable assertion harness, not a JUnit suite.
+tasks.named('test') { failOnNoDiscoveredTests = false }

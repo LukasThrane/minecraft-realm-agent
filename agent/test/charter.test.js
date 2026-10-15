@@ -18,8 +18,8 @@ test('a missing charter is empty rather than fatal',()=>{
 test('the charter reaches the goal-level system prompt',async()=>{
   let sent;
   const planner=new Planner({modelEnabled:true,model:'m',ollamaUrl:'http://x',charter:'CHARTER SENTINEL TEXT'},
-    async(url,init)=>{sent=JSON.parse(init.body);return {ok:true,json:async()=>({message:{content:'{"type":"continue","x":0,"z":0,"direction":"forward","ticks":20,"why":"ok"}'}})};});
-  await planner.decide({goal:'g',situation:'s',trend:'t',recent:[],banned:'',active:'idle'});
+    async(url,init)=>{sent=JSON.parse(init.body);return {ok:true,json:async()=>({message:{content:'{"tool":"yield","args":{}}'}})};});
+  await planner.turn({conversation:[]},async()=>({}));
   const system=sent.messages.find(message=>message.role==='system').content;
   assert.ok(system.includes('CHARTER SENTINEL TEXT'));
   assert.ok(system.includes('may not change'),'the model must be told it does not own the charter');
@@ -28,9 +28,9 @@ test('the charter reaches the goal-level system prompt',async()=>{
 test('without a charter the prompt carries no empty placeholder',async()=>{
   let sent;
   const planner=new Planner({modelEnabled:true,model:'m',ollamaUrl:'http://x'},
-    async(url,init)=>{sent=JSON.parse(init.body);return {ok:true,json:async()=>({message:{content:'{"type":"continue","x":0,"z":0,"direction":"forward","ticks":20,"why":"ok"}'}})};});
-  await planner.decide({goal:'g',situation:'s',trend:'t',recent:[],banned:'',active:'idle'});
+    async(url,init)=>{sent=JSON.parse(init.body);return {ok:true,json:async()=>({message:{content:'{"tool":"yield","args":{}}'}})};});
+  await planner.turn({conversation:[]},async()=>({}));
   const system=sent.messages.find(message=>message.role==='system').content;
   assert.ok(!system.includes('charter'),system.slice(0,120));
-  assert.ok(system.startsWith('You choose the next action'));
+  assert.ok(system.startsWith('You control a Minecraft character'));
 });

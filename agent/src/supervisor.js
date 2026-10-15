@@ -8,9 +8,14 @@ export class Supervisor {
     this.revision = 0; this.abort = new AbortController(); this.active = null; this.lastPhase = ''; this.dead = false;
   }
   invalidate() { ++this.revision; this.abort.abort(); this.abort = new AbortController(); this.active = null; }
-  async stop() {
+  /**
+   * Cancel whatever is running. `keepSafety` marks the agent cancelling its own work -- a
+   * retarget, a guard, a replaced job -- which must not switch the client safety tier off. Only
+   * an operator stop does that.
+   */
+  async stop({ keepSafety = false } = {}) {
     this.invalidate();
-    await this.bridge.stop();
+    await this.bridge.stop(keepSafety ? { keepSafety: true } : {});
     this.emit({ kind: 'stop', message: 'Stop accepted by bridge; release occurs on next client tick' });
   }
   async order(text, assumes) {
@@ -20,7 +25,7 @@ export class Supervisor {
     if (direct?.type === 'respawn') return this.recovery ? this.recovery.handle() : this.bridge.state();
     // Stop the old goal before interpreting a replacement. Slow inference never retains control.
     this.invalidate(); const revision = this.revision, signal = this.abort.signal;
-    await this.bridge.stop();
+    await this.bridge.stop({ keepSafety: true });
     if (revision !== this.revision) return;
     this.emit({ kind: 'order', message: text });
     // A terminal command may arrive while focus loss has opened Minecraft's menu.
@@ -39,7 +44,7 @@ export class Supervisor {
     if (Date.now() - fresh.observedAt > 2000) throw Error('Client observation is stale');
     const id = randomUUID();
     await this.bridge.act(action, fresh, id, deadlineFor(action), scopeFor(action), validateAssumptions(assumes));
-    if (revision !== this.revision) { await this.bridge.stop(); return; }
+    if (revision !== this.revision) { await this.bridge.stop({ keepSafety: true }); return; }
     this.active = { id, session: fresh.session, submittedAt: Date.now() };
     this.emit({ kind: 'submitted', id, action, message: `${action.type} submitted${action.type === 'navigate' ? ` to ${action.x}, ${action.z}` : ''}; not yet verified` });
   }
@@ -61,7 +66,7 @@ export class Supervisor {
     const id = randomUUID();
     const revision = this.revision;
     await this.bridge.act(checked, state, id, deadlineFor(checked), scopeFor(checked), validateAssumptions(assumes));
-    if (revision !== this.revision) { await this.bridge.stop(); return null; }
+    if (revision !== this.revision) { await this.bridge.stop({ keepSafety: true }); return null; }
     this.active = { id, session: state.session, submittedAt: Date.now() };
     this.emit({ kind: 'dispatched', id, action: checked, assumes, message: `${checked.type} dispatched without stopping the body` });
     return id;
@@ -96,7 +101,7 @@ export class Supervisor {
     const state = await this.bridge.state();
     if (revision !== this.revision) return state;
     if (this.active) {
-      if (state.session !== this.active.session || Date.now() - state.observedAt > 2000) { await this.stop(); throw Error('Session changed or observations stale'); }
+      if (state.session !== this.active.session || Date.now() - state.observedAt > 2000) { await this.stop({ keepSafety: true }); throw Error('Session changed or observations stale'); }
       if (state.outcome?.actionId === this.active.id && state.outcome.status) {
         const outcome = state.outcome;
         this.emit({ kind: 'outcome', id: this.active.id, phase: outcome.status === 'cancelled' ? 'stopped' : outcome.status,
@@ -113,7 +118,7 @@ export class Supervisor {
         // truth either way. Losing control for real still shows up as an outcome, not silence.
         try { await this.bridge.lease(state); } catch (error) { this.emit({ kind: 'lease_refused', message: `Lease not renewed: ${error.message}` }); }
       } else if (Date.now() - this.active.submittedAt > 2000) {
-        await this.stop();throw Error('Action was not started by client');
+        await this.stop({ keepSafety: true });throw Error('Action was not started by client');
       }
     }
     // Death is the one condition that must be noticed without being asked about.
@@ -123,6 +128,12 @@ export class Supervisor {
       if (this.recovery) await this.recovery.handle().catch(error => this.emit({ kind: 'recovery_failed', message: `Death handling failed: ${error.message}` }));
     } else if (!state.dead && this.dead) {
       this.dead = false;
+    }
+    for (const event of state.survivalEvents ?? []) {
+      if(this.survivalSession!==state.session || event.clientTick> (this.survivalTick ?? -1)) {
+        this.emit({kind:'survival',message:`${event.event}: ${event.why}`,evidence:event});
+        this.survivalSession=state.session;this.survivalTick=event.clientTick;
+      }
     }
     const phase = `${state.session}:${state.phase}`;
     if (phase !== this.lastPhase) { this.lastPhase = phase;this.emit({ kind: 'state', state }); }

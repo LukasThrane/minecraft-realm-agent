@@ -1,5 +1,340 @@
 # Minecraft agent redesign
 
+## Survival refactor — 2026-09-09
+
+This section supersedes earlier claims about blanket hostile-radius retreat, capped retreat being
+safe completion, the five-preemption job allowance, combat being absent, and the first refactor's
+flat-ground-only retreat. Building research remains deferred. The supporting survey is
+[SURVIVAL_RESEARCH.md](SURVIVAL_RESEARCH.md).
+
+**Investigation.** The reported diamond-pickaxe failure is recorded in `runtime/run-1788968704221.jsonl`:
+six retreat episodes, full-health preemption snapshots, then the five-resume failure. That journal
+does not identify the triggering entity; peaceful mode and rain are operator observations, not a
+diagnosis. The original defect was treating `Enemy` membership plus distance as danger regardless of
+geometry or aggression, then releasing safety on timer expiry with the trigger unchanged.
+
+The first refactor fixed the false positives and was then run live
+(`runtime/survival-live-1788970337357.jsonl`, build `survival-evidence-1`). It exposed two further
+defects, both visible in that journal:
+
+- **Steering.** Heading came from the next integer grid cell (`atan2(-cell.x, cell.z)`), so it was
+  always cardinal, and the route was re-searched every tick, so the chosen direction flipped between
+  neighbouring cells from one tick to the next. The recorded path is a staircase of right angles.
+- **No viable response.** The bot walked, never sprinted, from a spider — which is faster than a
+  sprinting player. Separation stayed between 1.4 m and 5.7 m for the whole episode, the 200-tick
+  movement budget expired, and the client then *froze* beside the spider and took damage. The fight
+  branch could not fire: it required an axe specifically, exactly one threat, distance ≤ 3 and a
+  hardcoded type list.
+
+**Implemented.**
+
+- `ThreatAssessment` splits into `assess` (observations to credible-threat evidence, memory through
+  occlusion, episode bookkeeping) and `respond` (a pure choice over that evidence, our loadout and
+  whether a route actually exists). Hostile profiles still need attack opportunity; neutral and
+  unknown entities still need aggression plus approach or attributed client damage. No difficulty,
+  weather or Enemy-membership bypass exists.
+- New pure `Combat` makes fight-or-flight arithmetic rather than a whitelist: vanilla weapon damage
+  and attack speed capped by mob hurt-immunity, armour reduction, per-type incoming damage, and a
+  weakest-first sequential kill estimate. Fighting is chosen when the estimate leaves health in
+  hand (`RESERVE`), which is what makes attacker count, weapon, armour and current health all
+  matter at once. Excluded on purpose: creepers, anything ranged or airborne, group-aggro mobs,
+  and mobs whose loss is unrecoverable.
+- Retreat that is not working escalates instead of freezing: no separation gained after 60 ticks,
+  a spent movement budget, or an attacker that outruns a sprint now turns into a fight when the
+  fight is survivable, and being cornered with no route defends rather than standing still.
+- `EscapePlanner` searches steps up, drops within survivable height, and vertical clearance, with
+  one neighbour per direction and a cell ceiling so client-tick cost stays bounded. `lookahead`
+  returns the furthest step still reachable in a straight line.
+- `Survival` commits to an escape path in world coordinates for up to 20 ticks, steers at a
+  continuous heading with a bounded turn rate, sprints when fed, jumps for steps and collisions,
+  and keeps its commitment while airborne instead of reporting "no escape route" mid-jump. Combat
+  selects the best hotbar weapon (not only axes), holds one target until it dies or leaves, closes
+  the distance on foot and respects vanilla reach and cooldown. Attacking stays singleplayer-only.
+- Worksite recurrence guard, job preservation across interruptions, F8/stop/session authority and
+  the asynchronous evidence ring are unchanged from the first refactor. Evidence now also carries
+  weapon, dps, armour, fight capability, current target, yaw, sprint and ground state.
+
+**Automated validation.** `./scripts/build.sh` passes, including **1104 assertions** in the
+executable Java harness (many are successive ticks of one sequence, not 1089 independent scenarios),
+and `npm test --prefix agent` passes **147 tests**. The Java harness runs the production policy,
+combat arithmetic, route search and swept ground algorithm over voxel fixtures: neutral proximity,
+walls and vertical separation, ranged exposure, attributed damage, occlusion, blocked and hazardous
+routes, step-ups, drop limits, sealed rooms, search cost, steering lookahead, and the fight/flee
+thresholds (weapon quality, armour, health, attacker count, creeper and ranged exclusions, stalled
+retreat, cornered defence). Node integration tests run the real executor through interruption, hold,
+replanning and cancellation. None of this establishes Minecraft physics, packet semantics or live
+combat reliability.
+
+**Live status.** Build `survival-combat-10` is installed in `runtime/realm-client/mods/`; a restart is required before each new build can be
+exercised. Combat, smelting, job preservation and goal anchoring are now confirmed live; the fixes
+listed in the sections below are **pending live confirmation**: use
+[evals/survival.md](evals/survival.md) with `node scripts/survival-live.mjs [seconds]`, which
+journals modes, events, separation, turn rate, sprint state and assessment latency.
+
+**Live regressions found while validating this build, and fixed.**
+
+- `./windove run` armed the new build and the client tick threw once, reported only as
+  `Controller error: RuntimeException`. The catch recorded the class name and nothing else, and the
+  error snapshot was overwritten by the next successful tick, so the fault was undiagnosable. The
+  controller now logs the full stack trace to the client log and republishes it as
+  `lastControllerError` in `/state`.
+- A fault in threat assessment or actuation took the whole bridge to `blocked`, which is the wrong
+  failure mode for the tier that exists to fail safe. Survival is now contained: it logs once,
+  falls back to physiological maintenance, releases movement, and reports `survivalError` in
+  `/state` while skills keep working. The underlying exception is not yet identified; it needs one
+  reproduction on the instrumented build.
+- The run console could not be quit. Registering a SIGINT listener replaces Node's default
+  terminate, so once the run had ended Ctrl+C had nothing left to abort, and `readline.close()`
+  leaves stdin resumed, so the process stayed alive with nothing reading what was typed. Both
+  entry points now force-quit on a second Ctrl+C and release stdin when the run ends.
+
+**Second live run (`survival-combat-2`), and what it exposed.** Journals
+`runtime/run-1788971919*.jsonl` and `runtime/run-1788972045199.jsonl`. The steering and combat
+arithmetic worked as designed and the reasons were legible in the terminal, but three defects made
+the behaviour worse than useless in a real world, all fixed in `survival-combat-3`:
+
+- **Engagement collapsed whenever the player left solid ground.** Accessibility was answered only
+  from the ground route graph, and that graph was only searched when `onGround()`. In water the
+  journal shows `visible=true, accessible=false, onGround=false` with a zombie two metres away: no
+  target was ever engaged (`no engaged target`), no escape route existed, and the response was an
+  indefinite `hold` while taking hits. This, not the combat estimate, is why it would not attack a
+  baby zombie with a stone sword. Accessibility now has three sources: the route graph, a direct
+  contact test (arm's length plus line of sight, which needs no graph), and a 20-tick memory of a
+  recent yes so it cannot flicker off mid-fight.
+- **Water was a trap.** Every fluid was a contact hazard, so once in water no cell was reachable and
+  the response was a permanent hold. Water is now passable while already in it (lava never is), the
+  search runs while swimming, and retreat holds jump to stay at the surface.
+- **A retreat chased the horizon.** A skeleton stayed credible out to 26 m because occlusion memory
+  kept its first, close observation. An entity we can currently see beyond `DISENGAGE` (18 m) now
+  drops out of memory; occlusion memory is for things we lost sight of, not for distance.
+- Baby zombies and other pursuers faster than a sprint are now flagged from the observation
+  (`isBaby`) rather than a type table, so they take the escalate-to-fight path.
+- Route replanning tightens to five ticks while a creeper is among the threats.
+
+The single `Controller error: RuntimeException` from the first attempt did **not** recur across
+these runs, and no `survivalError` was logged. It remains unidentified; it occurred one tick after a
+`World/session changed`, and it is now contained and instrumented rather than fatal.
+
+**Bounded limitations.** No ranged weapons, shields, potions, armour swapping, block-placing escapes,
+swimming, boats, or global (Baritone) escape routing; no creeper, boss, PvP, ranged or group-aggro
+combat; no multiplayer combat at all; no chase after a fleeing target; no automatic relocation to an
+alternate worksite; no persistence across process exit or death. Combat numbers are normal-difficulty
+estimates without enchantments, potions or knockback, and are calibration targets, not guarantees.
+Unknown damage is never attributed to a nearby mob. A worksite guard whose entity unloads can still
+need human intervention, and a hold preserves intent without guaranteeing survival.
+
+## Furnace, fuel, goal anchoring and a disarmed safety tier — 2026-09-09
+
+Four defects from a live diamond-pickaxe run (`runtime/run-1788972*.jsonl`). The survival tier's
+fight decision worked in that run — `fight: 1 target(s), stone_sword 8.0 dps, est. 9.0 damage`
+falling to `1.8` as the zombie died — but everything below went wrong.
+
+**Safety switched itself off after one death.** Dying or opening a menu with a response active
+called `disarm()`, which cleared `reflexArmed` permanently. After the first death the transcript has
+no survival events at all, which is why a zombie could stand and hit an idle player. Death and menus
+now cancel the response and the preempted action but leave safety armed; only F8, an explicit
+disarm, or a controller fault turns it off. The run also re-arms from its own cycle if it ever
+observes safety off.
+
+**A furnace with anything in it was a hard failure.** `smelt` threw `furnace_not_empty` on any
+existing contents, so an interrupted smelt stranded its ore. It now resumes: it drains finished
+output, counts ore already inside as progress, tops up only what is missing, and reassesses when
+the furnace goes idle or runs out of fuel.
+
+**Only coal counted as fuel.** The executor now burns coal, charcoal, coal blocks, blaze rods,
+dried kelp blocks, logs, planks and sticks, with the correct items-per-unit for each, preferring
+fuel that is only fuel. The planner spends burnable wood it already carries (keeping a margin back
+for crafting) and plans to mine coal only when nothing burnable is on hand.
+
+**Ore inside a furnace was invisible to planning.** Furnace contents are not synced to the client
+unless the menu is open, so the agent replanned from inventory, saw one ingot and went back to mine
+ore that was already cooking. The client now remembers what it put in, reconciles that against the
+real slots every time it opens the furnace, publishes it as `smelting`, and the executor collects it
+before making a new plan.
+
+**The overarching goal kept being cancelled for its own prerequisites.** `obtain:diamond_pickaxe`
+was cancelled for `obtain:iron_pickaxe`, that for `obtain:coal`, and when the iron pickaxe finished
+the run called the goal met. Both are steps inside the diamond chain the planner had already laid
+out. A new goal that is part of the running job is now refused with that reason instead of
+cancelling it, and deliberation is told what the running job is and what it has left to do — it
+previously reported `idle` between a job's own steps, which invited exactly this.
+
+`skillsVersion` is now 3: the executor's collect-before-plan step depends on the resuming smelt, so
+an old client is refused rather than paired with it.
+
+## The diamond pickaxe run, and four defects it left — 2026-09-09
+
+`survival-combat-4` completed `get a diamond pickaxe` end to end: gather, craft, deploy stations,
+smelt (`Smelted output observed in inventory: minecraft:iron_ingot`), fight off zombies mid-job
+(`fight: 1 target(s), iron_sword 9.6 dps, est. 7.7 damage` falling as the target died), suspend and
+resume the job across survival episodes, and craft the pickaxe. The goal anchoring held: every
+attempt to cancel the chain for `obtain:iron_pickaxe` was refused with its reason. Four defects
+remained, fixed in `survival-combat-5`:
+
+- **Every job cancellation disarmed safety.** `/stop` disarmed the client safety tier, and the agent
+  issues a stop whenever it retargets or replaces a job, so `Safety reflexes were off; re-armed`
+  recurred through the run. `/stop` now takes `keepSafety`: the agent's own cancellations stop work
+  and keep safety armed, while an operator stop still switches it off.
+- **A skeleton beyond bow range kept driving a retreat.** Reacquisition used a 16 m radius for
+  everything, so a skeleton at 14–15 m stayed credible with nothing engaged (`no engaged target`),
+  and the response oscillated between retreat and hold for a long time. Ranged and airborne
+  profiles are now bounded by their own engagement range, in both first contact and memory.
+- **An unreachable station failed the whole job.** `station_unreachable: no route to crafting_table`
+  ended `obtain:diamond_pickaxe` twice, because the station stayed in memory and the planner
+  therefore never placed another. A station we could not walk to after three attempts is now
+  forgotten, so the next plan deploys a new one.
+- **The stuck detector stopped a run that was one step from finishing.** Six already-satisfied
+  proposals in a row ended the run while `craft: 1 minecraft:diamond_pickaxe` was executing.
+  Unusable decisions no longer count toward it while a job is running: the detector exists for a
+  run that is achieving nothing, and a running job is not that.
+
+## Second diamond-pickaxe run: five more defects — 2026-09-09
+
+`survival-combat-5` fought well (zombies killed on contact, job preserved and resumed each time)
+but did not finish the goal. Fixed in `survival-combat-6`:
+
+- **Forgetting an unreachable station did not work.** `Stations.unreachable` removed the entry, and
+  the very next scan found the block still standing and put it straight back, so
+  `station_unreachable: no route to crafting_table at 547,63,88` failed the job three times in a
+  row with the identical message. Unreachable positions are now held in a blacklist that the scan
+  respects, cleared with the world.
+- **A phantom was an unanswerable threat.** Airborne mobs were never fightable, so a phantom
+  circling at 1–11 m produced a permanent withdrawal at night. Phantoms are now fightable *when
+  within reach*: `Combat.Target` carries `reachable`, and anything flying beyond contact range
+  makes the whole engagement unwinnable rather than inviting a chase we cannot win.
+- **Explosion damage was charged per second.** A creeper's 22 contributed to every second of the
+  estimate, producing `est. 159.0 damage over 6.6s`. Burst damage now lands once. The decision was
+  already right; the number was arithmetic noise in the operator's log.
+- **The response flapped between retreat and hold every few ticks.** Route scoring demanded a full
+  block of extra clearance and near-monotone progress, so marginal terrain produced a route only on
+  some ticks. The thresholds are relaxed, and engagement now has hysteresis: a mob hovering at
+  exactly the radius keeps its engaged status for another two metres instead of flipping the whole
+  response every tick.
+- **The run gave up with its goal never attempted.** Six `already holding iron_pickaxe` rejections
+  ended it while the diamond pickaxe had not been tried since its job failed. Before stopping, a
+  stuck run now starts its own stated goal if that goal is plannable and unmet; if the goal is
+  already met, it still stops.
+
+## Kit management, decision cadence and readable logs — 2026-09-09
+
+Four operator requests plus a defect they exposed, in `survival-combat-7`.
+
+**Armour and hotbar are now maintained by the client** (`Loadout.java`). Inventory position is not
+cosmetic: the safety tier only reads the hotbar, so live the bot fought a zombie with a
+`diamond_pickaxe 6.0 dps` while carrying an iron sword it could not reach, and armour was mined,
+crafted, carried and never worn. Between actions the client now wears the best piece it owns in
+each armour slot and keeps the best pickaxe, sword, axe, shovel and something edible in the hotbar,
+one container click at a time, displacing only items the kit does not need. It runs on the tick, so
+it costs no model latency, and only while nothing else owns the cursor.
+
+**Decision cadence.** A finished job or action now forces the next deliberation immediately instead
+of waiting out the interval, which is what left the body idle between sub-goals. In the other
+direction, a running job is supervised on the slow clock whether or not the client reports
+progress: a long mine legitimately reports zero, and treating that as a reason to ask again every
+few seconds produced seventeen `continue` answers in a single gather, each costing ten seconds of
+inference.
+
+**Batch size is the model's to choose.** The action already accepts 1..256; the prompt now says so,
+and says why -- the trip underground costs the same whether it brings back three ores or thirty.
+
+**Timestamps.** Both consoles now print `[HH:MM:SS +Ns]` per line: wall clock plus the gap since
+the previous line, so deliberation latency and dead time between actions are readable rather than
+inferred.
+
+Ranking is unit-tested; the slot moves themselves talk to the player's container menu and need a
+running client, so they are live-validated only. Nothing here equips a shield or an offhand item,
+manages armour durability, or drops junk to make room.
+
+## The overseer, and four things the run kept getting wrong — 2026-09-09
+
+**The run is now a goal queue with an overseer, not a single goal string.** New
+[goals.js](agent/src/goals.js) holds what the agent intends to do, ordered by urgency (0 urgent,
+5 ordinary, 9 whenever). The deterministic layer retires goals it already satisfies and starts the
+next one **without a model call**; the overseer is asked only when something changed -- the
+operator said something, a goal ended or failed, a condition became worth acting on, or the queue
+is empty. That replaces the old behaviour where a completed goal left the model answering
+"the diamond pickaxe is already obtained" every ten seconds with nothing queued behind it.
+
+- **The console is a conversation.** Bare text is no longer an instant mission replacement: it goes
+  to the overseer, which answers through `say` and decides where the request belongs. A request is
+  a request -- an ordinary-priority goal joins the queue behind a chain that is halfway done, and
+  only a goal the overseer marks more urgent than the running one preempts it. `/goal` still
+  replaces the mission outright.
+- **Health and hunger are noticed.** The runner reports a change in condition (`badly hurt (6/20)`,
+  `hungry (food 3/20)`) to the operator and to the overseer, and treats it as a reason to think.
+  Combat thresholds are now fractions of the character's actual maximum health rather than absolute
+  hearts, and absorption counts as the hit points it is, so a golden apple or an attribute change is
+  reflected without a code change. The client also eats to heal, not only to stop starving:
+  vanilla regenerates only while food is nearly full.
+- **Look where you are going.** Baritone's default sends rotations to the server without moving the
+  camera, so from a spectator's seat the character sprinted backwards with its eyes locked
+  somewhere irrelevant. Free-look is off, block-free-look is off, smooth look is on.
+- **Take the stone that is already open.** A gather now counts nearby target blocks that are open
+  to air, and when there are plenty it restricts mining to exposed targets rather than tunnelling
+  to whichever buried block is closest in a straight line -- observed live walking past a hillside
+  of stone and then digging down through dirt for three blocks of it. This one is a heuristic on
+  Baritone's own setting and needs live confirmation.
+- **Batch size is the model's.** The prompt now says the count is its to choose and why.
+
+Not addressed: the agent cannot acquire food (no mob or crop skills), so a hunger condition is
+reported and eaten from the bag but cannot be resolved by the queue. The overseer's `say` is not a
+transcript -- it answers the latest message with the state it has, and does not remember the
+conversation beyond the recent-goal history.
+
+## Cornered means fight, and six other things that killed it — 2026-09-09
+
+An iron-gear run died three times in seven minutes and then ran itself into a corner it could not
+plan out of. Fixed in `survival-combat-9`.
+
+- **Cornered was answered with standing still.** The old rule only defended when the fight was
+  winnable and the mob was on a list; anything else held. Live that meant holding while three
+  zombies killed it, twice. Now: if we cannot leave and something reachable is not an explosion,
+  fight it -- favourable or not, armed or not. An unfavourable fight beats being hit for free. Only
+  a primed creeper is still not worth swinging at, because nothing we can do in the time available
+  changes that outcome.
+- **The response flapped between fight, hold and retreat every tick**, and since each change drops
+  the target, the fight landed no hits. A chosen fight is now committed to for fifteen ticks while
+  the target is still visible and in reach.
+- **Dying banned the goal.** Three deaths mid-chain recorded three failures against
+  `obtain:iron_ingot`, after which the run refused the only objective it had. Failures that say
+  nothing about the goal -- death, control change, operator takeover -- are no longer recorded
+  against it.
+- **It ate rotten flesh.** Anything with a food component counted. Rotten flesh, spider eye,
+  poisonous potato, pufferfish and raw chicken are now last-resort only, eaten at food 2 or below.
+- **It mined three cobble and then spent them climbing out.** Baritone pillars with whatever it may
+  throw away, and cobblestone was always on that list. It is now only spendable when we hold more
+  than sixteen, and never the item the current gather is collecting.
+- **Stone was three blocks out of reach.** The mining band for cobblestone was the origin's level
+  minus three, so on any normal surface the stone layer was outside it and the search walked until
+  it found an outcrop. The band is now twelve blocks for stone, unchanged for logs.
+- **`obtain iron_ore` was refused.** Asking for the ore block is what a model naturally says; ore
+  blocks now resolve to what they drop, and `stone` to cobblestone.
+- **Questions went unanswered.** The overseer is now told it must fill in `say` whenever the
+  operator has spoken, and a silent answer is reported as silence rather than charged to the run's
+  stuck-detector.
+
+## Standing still while dying, and kiting — 2026-09-09
+
+Three deaths in six minutes, each ending with the character stationary while mobs hit it. Two
+causes, one of them mine, both fixed in `survival-combat-10`.
+
+- **The fight actuator refused to fight without a weapon.** `Survival.fight` returned immediately
+  when no hotbar weapon was found, so after a death dropped the kit the policy chose `fight` and
+  the body then did nothing at all. Bare hands hit; the slot switch is now conditional and the
+  swing is not. This is the literal standing-still-while-dying in the log.
+- **`hold` was still the answer whenever nothing was engaged**, including on open ground with a
+  creeper walking in. New `kite` response: face the nearest threat, give ground while it is closer
+  than we want it (six metres from anything explosive, three from anything else), and hit it when
+  it comes into reach unless it is a creeper. It needs no planned route -- one collision-checked
+  step at a time -- which matters because the route search is exactly what is missing when the
+  response would otherwise freeze. Anything credible within twelve metres is now answered by
+  giving ground rather than standing still; `hold` survives only for threats nothing can reach.
+
+The log also shows the route search reporting "no escape route" on open ground, which should not
+happen. I have guessed at that twice and been wrong twice, so this build publishes
+`reachableCells` in the survival evidence instead: the next occurrence will say whether the search
+found nowhere to stand or found ground and rejected every route through it.
+
 ## Generative building research direction — 2026-09-09
 
 Current exploratory ideas are in [BUILDING_RESEARCH.md](BUILDING_RESEARCH.md).

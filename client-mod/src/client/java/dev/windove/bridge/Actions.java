@@ -52,11 +52,19 @@ final class Actions {
         JsonObject args = request.has("args") && request.get("args").isJsonObject() ? request.getAsJsonObject("args") : new JsonObject();
         switch (type) {
             case "skill" -> {
-                if(!Set.of("gather","craft","deploy_station","smelt").contains(string(args,"kind"))) throw new IllegalArgumentException("Unsupported skill");
+                if(!Set.of("gather","craft","deploy_station","smelt","eat","equip","shaft").contains(string(args,"kind"))) throw new IllegalArgumentException("Unsupported skill");
                 if(!string(args,"item").matches("minecraft:[a-z0-9_]+")) throw new IllegalArgumentException("Invalid item");
                 if(number(args,"count")<1 || number(args,"count")>256) throw new IllegalArgumentException("Invalid count");
                 if(string(args,"kind").equals("smelt") && (!string(args,"item").equals("minecraft:iron_ingot") || number(args,"count")>8)) throw new IllegalArgumentException("Smelting supports 1..8 iron ingots");
                 if(string(args,"kind").equals("gather") && (!args.has("blocks") || args.getAsJsonArray("blocks").size()>32)) throw new IllegalArgumentException("Invalid blocks");
+                String kind=string(args,"kind");
+                if(kind.equals("eat") && (number(args,"targetFood")<1 || number(args,"targetFood")>20)) throw new IllegalArgumentException("Invalid targetFood");
+                if(kind.equals("shaft") && (number(args,"count")>32 || !Set.of("north","south","east","west").contains(string(args,"direction")) || number(args,"torchEvery")<1 || number(args,"torchEvery")>8)) throw new IllegalArgumentException("Invalid staircase specification");
+                for(String key:Set.of("minFood","minHealth","minDurability")) if(args.has(key) && (!Double.isFinite(decimal(args,key)) || decimal(args,key)<0 || decimal(args,key)>100)) throw new IllegalArgumentException("Invalid expedition limit");
+                if(args.has("returnToOrigin") && (!args.get("returnToOrigin").isJsonPrimitive() || !args.getAsJsonPrimitive("returnToOrigin").isBoolean())) throw new IllegalArgumentException("Invalid return policy");
+                if(args.has("reserves")) for(var entry:args.getAsJsonObject("reserves").entrySet()) {
+                    if(!entry.getKey().matches("minecraft:[a-z0-9_]+") || number(args.getAsJsonObject("reserves"),entry.getKey())<0) throw new IllegalArgumentException("Invalid reserve");
+                }
                 if(string(args,"kind").equals("craft")) {
                     long width=number(args,"width");
                     if(width<1 || width>3 || args.getAsJsonArray("grid").size()>9 || args.getAsJsonArray("grid").size()%width!=0) throw new IllegalArgumentException("Invalid grid");

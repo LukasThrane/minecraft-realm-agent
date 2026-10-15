@@ -27,7 +27,11 @@ export class Bridge {
     return { bytes: Buffer.from(await response.arrayBuffer()), capturedAt: Number(header('captured-at')), ageMs: Number(header('age-ms')),
       fresh: header('fresh') === 'true', width: Number(header('width')), height: Number(header('height')), session: header('session') };
   }
-  stop() { return this.request('/stop', {}); }
+  /**
+   * Cancel whatever the client is doing. `keepSafety` marks a stop the agent issued to cancel its
+   * own job: work stops, but the client safety tier stays armed. An operator stop does not pass it.
+   */
+  stop(options = {}) { return this.request('/stop', options); }
   lease(state) { return this.request('/lease', { session: state.session, epoch: state.epoch }); }
   respawn(state, id) { return this.request('/respawn', { session: state.session, epoch: state.epoch, observedAt: state.observedAt, id }); }
   navigate(goal, state, id) { return this.request('/navigate', { ...goal, session: state.session, epoch: state.epoch, observedAt: state.observedAt, id }); }

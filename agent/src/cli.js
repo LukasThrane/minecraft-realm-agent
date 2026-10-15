@@ -21,8 +21,16 @@ import { SkillExecutor } from './skills.js';
  * Stop is the exception that needs no slash. A safety command must never fail because of syntax.
  */
 const args = process.argv.slice(2);
+// Wall clock plus the gap since the previous line: the same stamp the run console prints, so how
+// long a step or a decision actually took is readable rather than inferred.
+let printedAt = Date.now();
+const stamp = () => {
+  const now = new Date(), gap = (Date.now() - printedAt) / 1000;
+  printedAt = Date.now();
+  return `[${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')} +${gap.toFixed(1)}s]`;
+};
 const { config, bridge, agent, log } = await openSession({ args, name: 'events',
-  emit: event => console.log(event.message ?? `${event.state?.phase}: ${event.state?.reason}`) });
+  emit: event => console.log(`${stamp()} ${event.message ?? `${event.state?.phase}: ${event.state?.reason}`}`) });
 const input = createInterface({ input: process.stdin, output: process.stdout });
 const skills = new SkillExecutor(bridge, message => { console.log(message); log.emit({ kind: 'skill-progress', message }); });
 // One implementation of the look-only commands, shared with `./windove run`, so they behave the
@@ -32,10 +40,15 @@ let skillAbort;
 let closing = false, lastError = '', nextSample = 0, busy = false;
 
 async function shutdown() {
-  if (closing) return;
+  // A SIGINT listener replaces Node's default terminate, so a second Ctrl+C has to be honoured
+  // explicitly or an already-closing console looks wedged.
+  if (closing) { console.log('\nForce quit.'); process.exit(130); }
   closing = true; skillAbort?.abort();
   try { await agent.stop(); } catch {}
   input.close(); log.close();
+  // readline.close() leaves stdin resumed and keeps the loop alive with nothing reading it.
+  process.stdin.pause(); process.stdin.unref?.();
+  setTimeout(() => process.exit(0), 2000).unref();
 }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown); input.on('close', shutdown);
 

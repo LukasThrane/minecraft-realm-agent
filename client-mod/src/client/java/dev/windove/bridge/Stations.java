@@ -34,6 +34,8 @@ final class Stations {
     private static final int SCAN_H = 24, SCAN_V = 12, RESCAN_MS = 1000, RESCAN_DISTANCE_SQ = 16;
 
     private static final Map<BlockPos, String> known = new LinkedHashMap<>();
+    /** Stations that are still standing but that we could not route to. Cleared with the world. */
+    private static final Set<BlockPos> unreachable = new HashSet<>();
     private static Level level;
     private static long scannedAt;
     private static BlockPos scannedFrom;
@@ -44,7 +46,7 @@ final class Stations {
     static void invalidateScan() { scannedAt = 0; }
 
     /** A different world is a different set of stations; nothing carries over. */
-    static void forget() { known.clear(); level = null; scannedAt = 0; scannedFrom = null; }
+    static void forget() { known.clear(); unreachable.clear(); level = null; scannedAt = 0; scannedFrom = null; }
 
     private static String kindAt(Level world, BlockPos position) {
         var block = world.getBlockState(position).getBlock();
@@ -77,12 +79,22 @@ final class Stations {
         for (BlockPos position : BlockPos.betweenClosed(at.offset(-SCAN_H, -SCAN_V, -SCAN_H), at.offset(SCAN_H, SCAN_V, SCAN_H))) {
             if (!mc.level.hasChunkAt(position)) continue;
             String kind = kindAt(mc.level, position);
-            if (kind != null) known.put(position.immutable(), kind);
+            if (kind != null && !unreachable.contains(position)) known.put(position.immutable(), kind);
         }
         // Only a loaded chunk can disprove a remembered station.
         known.entrySet().removeIf(entry -> mc.level.hasChunkAt(entry.getKey())
             && !entry.getValue().equals(kindAt(mc.level, entry.getKey())));
     }
+
+    /**
+     * Stop offering a station we could not walk to. The block may still be there -- across a
+     * ravine, walled in, on a ledge -- but a station we cannot reach is not one we own, and
+     * remembering it made the planner skip placing a new one and fail the whole job instead.
+     *
+     * It has to be remembered as unreachable, not merely dropped: the block is still standing, so
+     * the next scan found it again and the job failed on the identical route three times running.
+     */
+    static void unreachable(BlockPos position) { known.remove(position); unreachable.add(position.immutable()); }
 
     /** Remembered positions of one kind, nearest first, bounded by what counts as usable. */
     static List<BlockPos> nearest(Minecraft mc, String kind) {

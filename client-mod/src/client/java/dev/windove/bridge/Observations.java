@@ -48,6 +48,11 @@ final class Observations {
         JsonArray stations=new JsonArray();
         for(String station:Stations.kinds(mc)) stations.add(station);
         out.add("stations",stations);
+        // Items we have left in a furnace. Inventory alone cannot see them, and planning from
+        // inventory alone is what made the agent go back for ore that was already smelting.
+        JsonObject smelting=new JsonObject();
+        Skills.pending().forEach(smelting::addProperty);
+        out.add("smelting",smelting);
         out.add("stationSites",Stations.sites(mc));
         return out;
     }
@@ -110,6 +115,8 @@ final class Observations {
             if (!(distance <= MAX_RADIUS)) continue;
             JsonObject json = new JsonObject();
             json.addProperty("id", entity.getId());
+            json.addProperty("uuid", entity.getUUID().toString());
+            json.addProperty("visible", self instanceof LivingEntity viewer && viewer.hasLineOfSight(entity));
             json.addProperty("type", String.valueOf(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType())));
             json.addProperty("hostile", entity instanceof Enemy);
             json.addProperty("player", entity instanceof Player);
@@ -132,15 +139,24 @@ final class Observations {
         JsonObject inventory = new JsonObject();
         var bag = player.getInventory();
         inventory.addProperty("selectedSlot", bag.getSelectedSlot());
-        inventory.addProperty("size", bag.getContainerSize());
+        inventory.addProperty("size", 41);
         JsonArray items = new JsonArray();
-        for (int slot = 0; slot < bag.getContainerSize(); slot++) {
+        for (int slot = 0; slot < 36; slot++) {
             ItemStack stack = bag.getItem(slot);
             if (stack.isEmpty()) continue;
             JsonObject item = new JsonObject();
             item.addProperty("slot", slot);
             item.addProperty("item", String.valueOf(BuiltInRegistries.ITEM.getKey(stack.getItem())));
             item.addProperty("count", stack.getCount());
+            if(stack.isDamageableItem()) item.addProperty("durability",stack.getMaxDamage()-stack.getDamageValue());
+            items.add(item);
+        }
+        net.minecraft.world.entity.EquipmentSlot[] equipment={net.minecraft.world.entity.EquipmentSlot.FEET,net.minecraft.world.entity.EquipmentSlot.LEGS,net.minecraft.world.entity.EquipmentSlot.CHEST,net.minecraft.world.entity.EquipmentSlot.HEAD,net.minecraft.world.entity.EquipmentSlot.OFFHAND};
+        for(int index=0;index<equipment.length;index++) {
+            ItemStack stack=player.getItemBySlot(equipment[index]);if(stack.isEmpty()) continue;
+            JsonObject item=new JsonObject();item.addProperty("slot",36+index);item.addProperty("equipmentSlot",equipment[index].getName());
+            item.addProperty("item",String.valueOf(BuiltInRegistries.ITEM.getKey(stack.getItem())));item.addProperty("count",stack.getCount());
+            if(stack.isDamageableItem()) item.addProperty("durability",stack.getMaxDamage()-stack.getDamageValue());
             items.add(item);
         }
         inventory.add("items", items);

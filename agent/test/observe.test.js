@@ -48,3 +48,11 @@ test('the trend says what changed, and shouts when it is bad',async()=>{
  assert.match(trend({samples:[at(0),at(30000,{x:40,hostiles:3,nearestHostile:4.2})]}),/hostiles peaked at 3, closest 4\.2m/);
  assert.equal(trend({samples:[]}),'No history yet.');
 });
+
+test('client evidence overrides legacy Enemy classification in threat summaries',()=>{
+  const observation={online:true,observedAt:Date.now(),self:{},entities:[{uuid:'neutral',hostile:true,type:'minecraft:enderman',distance:2}],
+    survival:{mode:'',reason:'no credible threat',threats:[]}};
+  assert.deepEqual(threats(observation),[]);
+  assert.match(describe(observation),/hostiles: none/);
+  assert.match(describe(observation),/other \(1\): enderman/);
+});

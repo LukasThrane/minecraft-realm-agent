@@ -2,6 +2,23 @@ import { catalog, itemId } from './crafting.js';
 
 const naturalLogs = ['oak','birch','spruce','jungle','acacia','dark_oak','mangrove','cherry','pale_oak'].map(wood=>`minecraft:${wood}_log`);
 const picks = ['minecraft:wooden_pickaxe','minecraft:stone_pickaxe','minecraft:iron_pickaxe','minecraft:diamond_pickaxe','minecraft:netherite_pickaxe'];
+/**
+ * Fuels the executor knows how to burn, as [item, items smelted per unit, spare kept back].
+ * Ordered by preference: things that are only fuel first, wood last because it is usually wanted
+ * for something else.
+ */
+const FUELS = [['minecraft:coal',8,0],['minecraft:charcoal',8,0],['minecraft:coal_block',80,0],
+  ['minecraft:oak_log',1.5,2],['minecraft:birch_log',1.5,2],['minecraft:spruce_log',1.5,2],
+  ['minecraft:oak_planks',1.5,4],['minecraft:birch_planks',1.5,4],['minecraft:spruce_planks',1.5,4]];
+const ORE_DROPS = {
+  'minecraft:iron_ore':'minecraft:raw_iron', 'minecraft:deepslate_iron_ore':'minecraft:raw_iron',
+  'minecraft:raw_iron_block':'minecraft:raw_iron',
+  'minecraft:gold_ore':'minecraft:raw_gold', 'minecraft:deepslate_gold_ore':'minecraft:raw_gold',
+  'minecraft:copper_ore':'minecraft:raw_copper', 'minecraft:deepslate_copper_ore':'minecraft:raw_copper',
+  'minecraft:coal_ore':'minecraft:coal', 'minecraft:deepslate_coal_ore':'minecraft:coal',
+  'minecraft:diamond_ore':'minecraft:diamond', 'minecraft:deepslate_diamond_ore':'minecraft:diamond',
+  'minecraft:stone':'minecraft:cobblestone'
+};
 const preferred = ['minecraft:oak_planks','minecraft:cobblestone','minecraft:oak_log','minecraft:coal'];
 const qualify = counts => Object.fromEntries(Object.entries(counts).map(([item,count])=>{
   if (!Number.isInteger(count) || count < 0) throw Error(`Invalid count for ${item}`);
@@ -73,8 +90,18 @@ export class DependencyPlanner {
     return methods;
   }
 
-  plan(name, count = 1, inventory = {}, { stations = [], budget = 10000, maxDepth = 40 } = {}) {
-    const normalized=itemId(name);
+  planMany(targets, inventory = {}, options = {}) {
+    if (!Array.isArray(targets) || !targets.length || targets.length > 32) throw Error('Need 1..32 targets');
+    const normalized = targets.map(entry => ({item:itemId(entry.item),count:entry.count}));
+    if (new Set(normalized.map(t => t.item)).size !== normalized.length) throw Error('Combine duplicate targets into one total');
+    return {...this.plan(normalized[0].item, normalized[0].count, inventory, {...options,targets:normalized}), targets:normalized};
+  }
+
+  plan(name, count = 1, inventory = {}, { stations = [], budget = 10000, maxDepth = 40, targets = null } = {}) {
+    // "obtain iron_ore" means the iron. Asking for the block is what the model naturally says, and
+    // refusing it with "no supported acquisition method" sent a run in circles for four minutes.
+    const asked=itemId(name);
+    const normalized=ORE_DROPS[asked] ?? asked;
     const target=normalized==='minecraft:logs' || normalized==='minecraft:log'?
       (Object.keys(inventory).map(itemId).find(item=>naturalLogs.includes(item)) ?? 'minecraft:oak_log'):normalized==='minecraft:cobble'?'minecraft:cobblestone':normalized==='minecraft:sticks'?'minecraft:stick':normalized==='minecraft:planks'?
       (Object.keys(inventory).map(itemId).find(item=>item.endsWith('_planks') || item.endsWith('_log'))?.replace(/_log$/,'_planks') ?? 'minecraft:oak_planks'):normalized;
@@ -153,7 +180,14 @@ export class DependencyPlanner {
             const group=grouped.get(key) ?? {choices:slot,quantity:0};
             group.quantity+=batches;grouped.set(key,group);
           }
-          if(method.kind==='smelt') grouped.set('fuel',{choices:['minecraft:coal'],quantity:Math.ceil(batches/8)});
+          if(method.kind==='smelt') {
+            // Coal is not the only thing that burns. Spend fuel we already carry when there is
+            // clearly enough of it, and only plan to go and mine coal when there is not. The
+            // margin keeps a plan from burning the planks it is about to need for a handle.
+            const held=FUELS.find(([fuel,per,margin])=>amount(fuel)>=Math.ceil(batches/per)+margin);
+            grouped.set('fuel',held?{choices:[held[0]],quantity:Math.ceil(batches/held[1])}
+              :{choices:['minecraft:coal','minecraft:charcoal'],quantity:Math.ceil(batches/8)});
+          }
           for(const group of grouped.values()) {
             let needed=group.quantity;
             for(const candidate of [...group.choices].sort(rankAlternative)) {
@@ -186,14 +220,31 @@ export class DependencyPlanner {
       throw Error(`Cannot obtain ${item}: ${errors[0] ?? 'no supported acquisition method'}`);
     };
     try {
-      ensure(target,count);
+      const wanted = targets ?? [{item:target,count}];
+      const reserved = {}, roots = [];
+      // Final outputs are reserved before later targets consume resources. Tool reservations
+      // remain reusable as tools, so an explicitly requested pickaxe is not crafted twice.
+      for (const entry of wanted) {
+        const item = itemId(entry.item), quantity = entry.count;
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 256) throw Error('Target count must be 1..256');
+        const needed = Math.max(0, quantity - (state.tools[item] ? 1 : 0));
+        ensure(item, needed);
+        roots.push(...deps(item));
+        if (picks.includes(item) && !state.tools[item]) {
+          state.tools[item] = { dependsOn: take(item, 1) };
+          if (needed > 1) { take(item, needed - 1); reserved[item] = needed - 1; }
+        } else { take(item, needed); reserved[item] = (reserved[item] ?? 0) + needed; }
+      }
+      for (const [item, quantity] of Object.entries(reserved)) {
+        state.lots[item] ??= []; state.lots[item].push({count:quantity,producer:null});
+      }
       const projectedInventory=Object.fromEntries(Object.keys(state.lots).map(item=>[item,amount(item)]).filter(([,quantity])=>quantity>0));
       for(const item of Object.keys(state.tools)) projectedInventory[item]=(projectedInventory[item]??0)+1;
       const {nodes,rename}=mergeGathers(state.nodes);
-      return {status:'planned',goal:{type:'obtain',item:target,count},nodes,rootDependencies:[...new Set(deps(target).map(rename))],
+      return {status:'planned',goal:{type:'obtain',item:target,count},nodes,rootDependencies:[...new Set(roots.map(rename))],
         initialInventory:initial,projectedInventory,stations:Object.fromEntries(Object.entries(state.stations).map(([station,id])=>[station,id?rename(id):id])),
         summary:nodes.filter(node=>node.kind==='gather').reduce((totals,node)=>({...totals,[node.item]:(totals[node.item]??0)+node.count}),{}),
-        executable:false,remainingSearchBudget:remaining,limitations:['Plan only: live skill executors not yet wired','No optimality guarantee; ordered bounded backtracking','Ore discovery, access and tool durability require execution-time checks','Fuel: coal, eight furnace operations per item, assumes one continuous batch','Vanilla 26.2 recipes; server datapacks may differ']};
+        executable:false,remainingSearchBudget:remaining,limitations:['Plan only: live skill executors not yet wired','No optimality guarantee; ordered bounded backtracking','Ore discovery, access and tool durability require execution-time checks','Fuel: coal or charcoal at eight operations each, or wood already carried at 1.5; assumes one continuous batch','Vanilla 26.2 recipes; server datapacks may differ']};
     } catch(error) {return {status:remaining<0?'incomplete':'blocked',goal:{type:'obtain',item:target,count},nodes:[],reason:error.message,executable:false};}
   }
 }

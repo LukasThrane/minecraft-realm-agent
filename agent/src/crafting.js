@@ -95,7 +95,8 @@ export class CraftingTools {
     const observation = await this.bridge.observe();
     const items = inventoryDict(observation);
     const craftingItems = inventoryDict({ ...observation, inventory: { items: observation.inventory.items.filter(entry => entry.slot >= 0 && entry.slot < 36) } });
-    return { observedAt: observation.observedAt, session: observation.session, items, craftingItems, stations: observation.stations };
+    return { observedAt: observation.observedAt, session: observation.session, items, craftingItems,
+      stations: observation.stations, smelting: observation.smelting ?? {} };
   }
   async craftable() { const inventory = await this.inventory(); return { ...inventory, ...craftable(inventory.craftingItems) }; }
   async canCraft(item) { const inventory = await this.inventory(); return { ...inventory, ...canCraft(item, inventory.craftingItems) }; }

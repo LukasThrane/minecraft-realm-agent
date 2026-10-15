@@ -17,6 +17,7 @@ command="${1:-console}"
 [ $# -gt 0 ] && shift
 case "$command" in
   console)  exec node "$ROOT/agent/src/cli.js" "$@" ;;
+  debug)    exec node "$ROOT/agent/src/debug.js" "$@" ;;
   run)      exec node "$ROOT/agent/src/runner.js" "$@" ;;
   gate1)    exec node "$ROOT/agent/src/gate1.js" "$@" ;;
   bench)    exec node "$ROOT/agent/src/bench.js" "$@" ;;

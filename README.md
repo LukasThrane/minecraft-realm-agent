@@ -123,44 +123,17 @@ Your installed `qwen2.5:14b` is reused; no additional model download is required
 
 The model translates broader wording into navigation/status/stop requests. Unsupported tasks are rejected. It is not yet a visual planner or autonomous survival policy. Exact stop and coordinate commands bypass inference. Do not expect mining, building or fighting in this increment.
 
-## Autonomous runs
+## Agent-owned autonomous runs
 
-```bash
-./windove run "walk to 200 200 and stay alive"
-```
+`./windove run --model "get full iron toolsets and armor"` now uses a dedicated inference worker, a persistent conversation and hierarchical plan, and explicit task starts. Plans do not auto-run. The agent reviews ongoing progress, receives critical events, and can pause, cancel or resume work. See [ARCHITECTURE.md](ARCHITECTURE.md) for the implemented control and memory contracts.
 
-A goal that persists, and a body that never waits for the model. Deliberation runs concurrently with whatever is already executing: when a decision lands it either confirms the running action — costing no interruption — or replaces it on the next client tick. Measured deliberation latency with `qwen2.5:14b` is 3.5–10 s, which is 70–200 client ticks the character spends moving rather than standing still.
+After updating, run `./windove build` and restart Minecraft. The new runner requires client skills version 4. Use `/agent-plan` to inspect the agent's objectives and `/tasks` to inspect execution state. `/goal` displays the current mission, `/goal <text>` changes it; ordinary text goes to the agent; `stop` ends the run. Saved memory lives under `runtime/agent-memory-*.json`, scoped to the world and dimension. Restarted tasks remain suspended until the agent explicitly resumes them.
 
-Guards, all of which fire without a model: an identical restatement of the running action is treated as `continue` rather than restarting the pathfinder; a typed failure repeated three times is refused and the planner is told why; malformed decisions are fed back to the next deliberation and six unusable ones in a row stop the run; there is an action budget. Ctrl+C stops cleanly.
+The review interval defaults to 20 seconds and can be changed with `--every <milliseconds>`. Model settings in `config/mvp.json` can additionally specify `agentToolBudget` (default 12), `agentOutputTokens` (650; operator replies use 180), `agentContextTokens` (4096), and `agentInferenceTimeoutMs` (120000). The model can call tools repeatedly inside one review; the body and safety controller keep running during inference.
 
-## Autonomous runs and `obtain`
+Every run prints a **Live inspector** URL. Open it in a browser to watch exact prompts, streamed model output, model-provided reasoning when available, inference timings, tool results and current task state. This displays what the model actually returns; there is no hidden reasoning available to retrieve. `./windove debug` opens a separate read-only viewer that follows `runtime/agent-debug.json` across runs; the adjacent `.jsonl` retains calls and tool events for later inspection. Both servers listen only on localhost.
 
-`./windove run "<goal>"` needs `--model` and Ollama. The model chooses goal-level actions; it never
-touches the control loop. Its most useful verb is `obtain {item,count}`, which hands the whole
-dependency chain to the same executor the console uses — so an autonomous run can now gather, craft,
-place stations and smelt, which it could not before.
-
-Jobs are started, never awaited: deliberation continues while the chain runs, and a repeated
-`obtain` decision is recognised as "keep going" rather than restarting it.
-
-**A run reads stdin**, using the same input language as the console: bare text is a goal, `stop`
-needs no slash. Type a new goal at any time to redirect it — the change takes effect at the next
-deliberation, and if a job is running it is cancelled and the client released before anything
-replaces it. A run whose goal is already met stops on its own rather than idling.
-
-Look-only commands work during a run — `/inventory`, `/plan`, `/look`, `/status`, `/history`,
-`/failures`, `/help` — because they read the client and never touch action authority. Commands that
-change something are refused; a run owns the body. A single word that is not a recognisable goal is
-questioned rather than acted on, so a typo no longer redirects the agent; `/goal <text>` overrides.
-
-While a job is running and making progress the agent stops asking the model what to do, because the
-answer is always "keep going" and, at ~11 tok/s locally, that answer is not free. It resumes
-thinking when the job ends, stalls, sixty seconds pass, or you type something.
-
-If the safety tier interrupts a job — eating, retreating, surfacing — the job **resumes** rather
-than dying, because progress for these jobs is the inventory. Only a takeover or a genuine step
-failure abandons it. Repeated interruption is reported as an unsafe working area rather than retried
-forever.
+Brief eating recovery can continue the same authorized task after stable safe clearance, without another model call. The agent can disable this with `resumeAfterEating:false`. Retreat, fire/lava, manual takeover, death and prolonged recovery still return control to the agent. Collected materials and the strategic plan are retained.
 
 ## The safety tier
 
@@ -223,3 +196,5 @@ Start `./windove` with Minecraft joined. `plan iron pickaxe` and `plan 12 dirt` 
 Install the updated client using `./windove build`, restart Minecraft and rejoin before executing skills. Return to gameplay and close the pause menu after entering the request. `stop`, Ctrl+C and F8 cancel execution. This is a gameplay-testing MVP: gathering searches only local loaded blocks, stations must remain nearby, and furnace processing supports raw iron with coal in an empty furnace. Failed steps stop with a reason; interrupted furnace contents remain in the world. Compilation and service tests do not establish live-game reliability.
 
 If the client bridge is not running on `127.0.0.1:3009`, goal previews automatically fall back to an explicit empty-inventory plan. Commands that need live state (`inventory`, `craftable`, `look`, movement) still require Minecraft and the bridge mod to be active.
+
+Operator messages and safety changes are delivered between model calls without restarting the conversation. Stale execution decisions are rejected independently. Pending operator messages get a short reply before further planning. The console reports model activity every 15 seconds while inference is pending.
